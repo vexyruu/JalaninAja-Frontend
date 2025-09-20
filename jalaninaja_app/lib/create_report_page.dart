@@ -144,13 +144,7 @@ class _CreateReportPageState extends State<CreateReportPage> {
 
     try {
       final request = http.MultipartRequest('POST', Uri.parse("$_apiBaseUrl/reports"));
-
-      // --- UPDATED: Add Authorization header ---
       request.headers['Authorization'] = 'Bearer $token';
-      
-      // --- REMOVED: user_id is no longer needed, backend gets it from token ---
-      // request.fields['user_id'] = user.id; 
-
       request.fields['category'] = _selectedCategory!;
       request.fields['latitude'] = _reportLocation!.latitude.toString();
       request.fields['longitude'] = _reportLocation!.longitude.toString();
@@ -440,7 +434,6 @@ class _LocationPickerState extends State<LocationPicker> {
                 ),
                 const Center(
                   child: Padding(
-                    // Padding to offset the icon so the tip is in the center
                     padding: EdgeInsets.only(bottom: 40.0),
                     child: Icon(
                       Icons.location_pin,

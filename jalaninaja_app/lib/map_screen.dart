@@ -24,7 +24,7 @@ class _MapScreenState extends State<MapScreen> {
 
   LatLng? _currentLocation;
   bool _isLoading = false;
-  String _loadingMessage = 'Calculating...'; // NEW: More descriptive loading message
+  String _loadingMessage = 'Calculating...';
   bool _isSearchCardExpanded = false;
   String _selectedMode = "distance_walkability";
 
@@ -34,8 +34,6 @@ class _MapScreenState extends State<MapScreen> {
   Set<Marker> _markers = {};
   
   String? _mapStyle;
-  
-  // --- NEW: State for handling asynchronous jobs ---
   String? _jobId;
   Timer? _pollingTimer;
 
@@ -53,7 +51,6 @@ class _MapScreenState extends State<MapScreen> {
   
   @override
   void dispose() {
-    // NEW: Cancel the timer to prevent memory leaks when the widget is removed.
     _pollingTimer?.cancel();
     _mapController?.dispose();
     _originController.dispose();
@@ -137,7 +134,6 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // --- REFACTORED: This function now starts the job and polling ---
   Future<void> _getRoute() async {
     if (_originController.text.isEmpty || _destinationController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -146,7 +142,6 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
     
-    // Reset previous results and start loading
     setState(() {
       _isLoading = true;
       _loadingMessage = 'Starting route analysis...';
@@ -154,13 +149,12 @@ class _MapScreenState extends State<MapScreen> {
       _polylines = {};
       _routeAlternatives = [];
       _selectedRouteIndex = -1;
-      _pollingTimer?.cancel(); // Cancel any previous timer
+      _pollingTimer?.cancel();
     });
 
     try {
       final Uri apiUrl = Uri.parse("$_apiBaseUrl/calculate-routes");
       
-      // 1. Initial POST request to start the job
       final response = await http.post(
         apiUrl,
         headers: {'Content-Type': 'application/json'},
@@ -171,16 +165,14 @@ class _MapScreenState extends State<MapScreen> {
         }),
       );
 
-      // 2. Check if the job was created successfully (202 Accepted)
       if (response.statusCode == 202) {
         final data = json.decode(response.body);
         _jobId = data['job_id'];
         
         if (_jobId != null) {
-          // 3. Start polling for the result
           setState(() {
             _loadingMessage = 'Analyzing walkability...';
-            _isSearchCardExpanded = false; // Collapse card after starting
+            _isSearchCardExpanded = false;
           });
           _pollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
             _pollRouteStatus(_jobId!);
@@ -195,7 +187,6 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // --- NEW: Function to poll the status endpoint ---
   Future<void> _pollRouteStatus(String jobId) async {
     try {
       final Uri statusUrl = Uri.parse("$_apiBaseUrl/routes/status/$jobId");
@@ -206,16 +197,16 @@ class _MapScreenState extends State<MapScreen> {
         final status = data['status'];
 
         if (status == 'completed') {
-          _pollingTimer?.cancel(); // Stop polling
+          _pollingTimer?.cancel();
           final alternatives = data['data'] as List;
 
           if (alternatives.isNotEmpty) {
             alternatives.sort((a, b) => (b['average_walkability_score'] as num).compareTo(a['average_walkability_score'] as num));
             setState(() {
               _routeAlternatives = alternatives.take(3).map((e) => e as Map<String, dynamic>).toList();
-              _isLoading = false; // Stop loading indicator
+              _isLoading = false;
             });
-            _selectRoute(0); // Select and display the best route
+            _selectRoute(0);
           } else {
             _showErrorAndStopLoading('No suitable routes were found.');
           }
@@ -226,11 +217,9 @@ class _MapScreenState extends State<MapScreen> {
           _showErrorAndStopLoading('Error: $error');
 
         } else {
-          // Still 'pending' or 'processing', do nothing and wait for the next poll.
           print('Route analysis status: $status');
         }
       } else {
-        // Handle cases where the status check itself fails
         _pollingTimer?.cancel();
         _showErrorAndStopLoading('Failed to get route status.');
       }
@@ -239,8 +228,7 @@ class _MapScreenState extends State<MapScreen> {
       _showErrorAndStopLoading('An error occurred while checking status: $e');
     }
   }
-  
-  // --- NEW: Helper to centralize error handling and stopping the loading state ---
+
   void _showErrorAndStopLoading(String message) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
@@ -307,7 +295,6 @@ class _MapScreenState extends State<MapScreen> {
             position: polylineCoordinates.last,
             icon: await _createCustomMarker(Colors.grey),
           ));
-          // Animate camera to fit the route
           _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_createLatLngBounds(polylineCoordinates), 50));
        }
     }

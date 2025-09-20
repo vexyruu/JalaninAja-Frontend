@@ -30,7 +30,6 @@ class _UserPageState extends State<UserPage> {
     _profileDataFuture = _fetchCombinedData();
   }
 
-  // --- NEW: Helper to get the auth token ---
   String? _getAuthToken() {
     return Supabase.instance.client.auth.currentSession?.accessToken;
   }
@@ -42,7 +41,7 @@ class _UserPageState extends State<UserPage> {
     }
     
     try {
-      // Use Future.wait to fetch both pieces of data concurrently
+
       final results = await Future.wait([
         _fetchUserProfile(token),
         _fetchUserTopReports(token),
@@ -61,7 +60,6 @@ class _UserPageState extends State<UserPage> {
     }
   }
 
-  // --- UPDATED: Fetches from /users/me using a token ---
   Future<Map<String, dynamic>> _fetchUserProfile(String token) async {
     final response = await http.get(
       Uri.parse("$_apiBaseUrl/users/me"),
@@ -74,7 +72,6 @@ class _UserPageState extends State<UserPage> {
     }
   }
 
-  // --- UPDATED: Fetches from /reports/me/top using a token ---
   Future<List<dynamic>> _fetchUserTopReports(String token) async {
     final response = await http.get(
       Uri.parse("$_apiBaseUrl/reports/me/top"),
@@ -88,8 +85,6 @@ class _UserPageState extends State<UserPage> {
   }
   
   void _navigateToSettings() async {
-    // Navigate to settings and wait for it to pop.
-    // If it returns, refresh the profile data.
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (context) => const SettingsPage()),
     );
