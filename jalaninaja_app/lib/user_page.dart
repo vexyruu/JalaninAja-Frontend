@@ -30,16 +30,22 @@ class _UserPageState extends State<UserPage> {
     _profileDataFuture = _fetchCombinedData();
   }
 
+  // --- NEW: Helper to get the auth token ---
+  String? _getAuthToken() {
+    return Supabase.instance.client.auth.currentSession?.accessToken;
+  }
+
   Future<UserProfileData> _fetchCombinedData() async {
-    final user = Supabase.instance.client.auth.currentUser;
-    if (user == null) {
+    final token = _getAuthToken();
+    if (token == null) {
       throw Exception('You must be logged in to view your profile.');
     }
     
     try {
+      // Use Future.wait to fetch both pieces of data concurrently
       final results = await Future.wait([
-        _fetchUserProfile(user.id),
-        _fetchUserTopReports(user.id),
+        _fetchUserProfile(token),
+        _fetchUserTopReports(token),
       ]);
       
       final profile = results[0] as Map<String, dynamic>;
@@ -55,25 +61,35 @@ class _UserPageState extends State<UserPage> {
     }
   }
 
-  Future<Map<String, dynamic>> _fetchUserProfile(String userId) async {
-    final response = await http.get(Uri.parse("$_apiBaseUrl/users/$userId"));
+  // --- UPDATED: Fetches from /users/me using a token ---
+  Future<Map<String, dynamic>> _fetchUserProfile(String token) async {
+    final response = await http.get(
+      Uri.parse("$_apiBaseUrl/users/me"),
+      headers: {'Authorization': 'Bearer $token'},
+    );
     if (response.statusCode == 200) {
       return json.decode(response.body);
     } else {
-      throw Exception('Failed to load user profile.');
+      throw Exception('Failed to load user profile. Status: ${response.statusCode}');
     }
   }
 
-  Future<List<dynamic>> _fetchUserTopReports(String userId) async {
-    final response = await http.get(Uri.parse("$_apiBaseUrl/reports/user/$userId"));
+  // --- UPDATED: Fetches from /reports/me/top using a token ---
+  Future<List<dynamic>> _fetchUserTopReports(String token) async {
+    final response = await http.get(
+      Uri.parse("$_apiBaseUrl/reports/me/top"),
+      headers: {'Authorization': 'Bearer $token'},
+    );
     if (response.statusCode == 200) {
       return json.decode(response.body);
     } else {
-      throw Exception('Failed to load top reports.');
+      throw Exception('Failed to load top reports. Status: ${response.statusCode}');
     }
   }
   
   void _navigateToSettings() async {
+    // Navigate to settings and wait for it to pop.
+    // If it returns, refresh the profile data.
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (context) => const SettingsPage()),
     );
@@ -208,7 +224,7 @@ class _UserPageState extends State<UserPage> {
   Widget _buildStatsRow(int contributions, int points, TextTheme textTheme) {
     return Row(
       children: [
-        Expanded(child: _buildStatCard('${contributions}', 'Contribution', textTheme)),
+        Expanded(child: _buildStatCard('$contributions', 'Contribution', textTheme)),
         const SizedBox(width: 16),
         Expanded(child: _buildStatCard(points.toString(), 'Point', textTheme)),
       ],
@@ -219,7 +235,7 @@ class _UserPageState extends State<UserPage> {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 16),
       decoration: BoxDecoration(
-        color: Colors.green.withOpacity(0.1), // Kept as per user request
+        color: Colors.green.withOpacity(0.1),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -235,7 +251,7 @@ class _UserPageState extends State<UserPage> {
   Widget _buildBadgeCard(String badgeName, TextTheme textTheme) {
     return Card(
       elevation: 0,
-      color: Colors.green.withOpacity(0.1), // Kept as per user request
+      color: Colors.green.withOpacity(0.1),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -361,3 +377,4 @@ class _UserPageState extends State<UserPage> {
     );
   }
 }
+

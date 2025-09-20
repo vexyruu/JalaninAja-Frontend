@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -23,6 +24,7 @@ class _MapScreenState extends State<MapScreen> {
 
   LatLng? _currentLocation;
   bool _isLoading = false;
+  String _loadingMessage = 'Calculating...'; // NEW: More descriptive loading message
   bool _isSearchCardExpanded = false;
   String _selectedMode = "distance_walkability";
 
@@ -32,6 +34,10 @@ class _MapScreenState extends State<MapScreen> {
   Set<Marker> _markers = {};
   
   String? _mapStyle;
+  
+  // --- NEW: State for handling asynchronous jobs ---
+  String? _jobId;
+  Timer? _pollingTimer;
 
   final String _googleApiKey = ConfigService.instance.googleMapsApiKey;
   final String _apiBaseUrl = ConfigService.instance.apiBaseUrl;
@@ -43,6 +49,16 @@ class _MapScreenState extends State<MapScreen> {
     DefaultAssetBundle.of(context).loadString('assets/map_style.json').then((string) {
       _mapStyle = string;
     });
+  }
+  
+  @override
+  void dispose() {
+    // NEW: Cancel the timer to prevent memory leaks when the widget is removed.
+    _pollingTimer?.cancel();
+    _mapController?.dispose();
+    _originController.dispose();
+    _destinationController.dispose();
+    super.dispose();
   }
 
   Future<String?> _getReadableAddress(LatLng location) async {
@@ -121,6 +137,7 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // --- REFACTORED: This function now starts the job and polling ---
   Future<void> _getRoute() async {
     if (_originController.text.isEmpty || _destinationController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -128,18 +145,22 @@ class _MapScreenState extends State<MapScreen> {
       );
       return;
     }
-
+    
+    // Reset previous results and start loading
     setState(() {
       _isLoading = true;
+      _loadingMessage = 'Starting route analysis...';
       _markers = {};
       _polylines = {};
       _routeAlternatives = [];
       _selectedRouteIndex = -1;
+      _pollingTimer?.cancel(); // Cancel any previous timer
     });
 
     try {
       final Uri apiUrl = Uri.parse("$_apiBaseUrl/calculate-routes");
       
+      // 1. Initial POST request to start the job
       final response = await http.post(
         apiUrl,
         headers: {'Content-Type': 'application/json'},
@@ -150,44 +171,86 @@ class _MapScreenState extends State<MapScreen> {
         }),
       );
 
-      if (response.statusCode == 200) {
+      // 2. Check if the job was created successfully (202 Accepted)
+      if (response.statusCode == 202) {
         final data = json.decode(response.body);
-        final alternatives = data['alternatives'] as List;
-        if (alternatives.isNotEmpty) {
-           alternatives.sort((a, b) => (b['average_walkability_score'] as num).compareTo(a['average_walkability_score'] as num));
-           setState(() {
-             _routeAlternatives = alternatives.take(3).map((e) => e as Map<String, dynamic>).toList();
-             _isSearchCardExpanded = false;
-           });
-          final firstRoutePolyline = _routeAlternatives[0]['overview_polyline'];
-          final polylinePoints = PolylinePoints().decodePolyline(firstRoutePolyline);
-          if (polylinePoints.isNotEmpty) {
-           final startPoint = LatLng(polylinePoints.first.latitude, polylinePoints.first.longitude);
-           _mapController?.animateCamera(CameraUpdate.newLatLngZoom(startPoint, 15.0));
-         }
-
-           _selectRoute(0); 
+        _jobId = data['job_id'];
+        
+        if (_jobId != null) {
+          // 3. Start polling for the result
+          setState(() {
+            _loadingMessage = 'Analyzing walkability...';
+            _isSearchCardExpanded = false; // Collapse card after starting
+          });
+          _pollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+            _pollRouteStatus(_jobId!);
+          });
         }
       } else {
         final error = json.decode(response.body);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: ${error['detail'] ?? 'Gagal mendapatkan rute'}')),
-        );
+        _showErrorAndStopLoading('Error: ${error['detail'] ?? 'Failed to start route calculation'}');
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Terjadi kesalahan: $e')),
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
+      _showErrorAndStopLoading('An error occurred: $e');
+    }
+  }
+
+  // --- NEW: Function to poll the status endpoint ---
+  Future<void> _pollRouteStatus(String jobId) async {
+    try {
+      final Uri statusUrl = Uri.parse("$_apiBaseUrl/routes/status/$jobId");
+      final response = await http.get(statusUrl);
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final status = data['status'];
+
+        if (status == 'completed') {
+          _pollingTimer?.cancel(); // Stop polling
+          final alternatives = data['data'] as List;
+
+          if (alternatives.isNotEmpty) {
+            alternatives.sort((a, b) => (b['average_walkability_score'] as num).compareTo(a['average_walkability_score'] as num));
+            setState(() {
+              _routeAlternatives = alternatives.take(3).map((e) => e as Map<String, dynamic>).toList();
+              _isLoading = false; // Stop loading indicator
+            });
+            _selectRoute(0); // Select and display the best route
+          } else {
+            _showErrorAndStopLoading('No suitable routes were found.');
+          }
+
+        } else if (status == 'failed') {
+          _pollingTimer?.cancel();
+          final error = data['error'] ?? 'Route analysis failed.';
+          _showErrorAndStopLoading('Error: $error');
+
+        } else {
+          // Still 'pending' or 'processing', do nothing and wait for the next poll.
+          print('Route analysis status: $status');
+        }
+      } else {
+        // Handle cases where the status check itself fails
+        _pollingTimer?.cancel();
+        _showErrorAndStopLoading('Failed to get route status.');
       }
+    } catch (e) {
+      _pollingTimer?.cancel();
+      _showErrorAndStopLoading('An error occurred while checking status: $e');
     }
   }
   
-    void _displaySelectedRoutePolyline() {
+  // --- NEW: Helper to centralize error handling and stopping the loading state ---
+  void _showErrorAndStopLoading(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+  
+  void _displaySelectedRoutePolyline() {
     Set<Polyline> newPolylines = {};
     if (_selectedRouteIndex == -1 || _routeAlternatives.isEmpty) {
       setState(() {
@@ -233,16 +296,20 @@ class _MapScreenState extends State<MapScreen> {
 
     if (points.isNotEmpty) {
       final polylineCoordinates = PolylinePoints().decodePolyline(selectedRoute['overview_polyline']).map((p) => LatLng(p.latitude, p.longitude)).toList();
-      newMarkers.add(Marker(
-        markerId: const MarkerId('start'),
-        position: polylineCoordinates.first,
-        icon: await _createCustomMarker(Colors.green, isStart: true),
-      ));
-      newMarkers.add(Marker(
-        markerId: const MarkerId('end'),
-        position: polylineCoordinates.last,
-        icon: await _createCustomMarker(Colors.grey),
-      ));
+       if (polylineCoordinates.isNotEmpty) {
+          newMarkers.add(Marker(
+            markerId: const MarkerId('start'),
+            position: polylineCoordinates.first,
+            icon: await _createCustomMarker(Colors.green, isStart: true),
+          ));
+          newMarkers.add(Marker(
+            markerId: const MarkerId('end'),
+            position: polylineCoordinates.last,
+            icon: await _createCustomMarker(Colors.grey),
+          ));
+          // Animate camera to fit the route
+          _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_createLatLngBounds(polylineCoordinates), 50));
+       }
     }
     
     await _addPointOfInterestMarkers(newMarkers, points, routeColor);
@@ -251,7 +318,6 @@ class _MapScreenState extends State<MapScreen> {
       _markers = newMarkers;
     });
   }
-
 
   Future<void> _addPointOfInterestMarkers(Set<Marker> markers, List<dynamic> points, Color color) async {
     for (var point in points) {
@@ -441,7 +507,21 @@ class _MapScreenState extends State<MapScreen> {
                 children: [
                   _buildSearchCard(),
                   if (_isLoading)
-                    const Center(child: CircularProgressIndicator()),
+                     // UPDATED: Show a more informative loading indicator
+                    Card(
+                      elevation: 4,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(),
+                            const SizedBox(width: 16),
+                            Text(_loadingMessage),
+                          ],
+                        ),
+                      ),
+                    ),
                   if (_routeAlternatives.isNotEmpty)
                     _buildRouteInfoCards(),
                 ],

@@ -133,8 +133,9 @@ class _CreateReportPageState extends State<CreateReportPage> {
       return;
     }
     
-    final user = Supabase.instance.client.auth.currentUser;
-    if (user == null) {
+    // --- UPDATED: Now gets the auth token ---
+    final token = Supabase.instance.client.auth.currentSession?.accessToken;
+    if (token == null) {
       _showErrorSnackBar('You must be logged in to create a report.');
       return;
     }
@@ -144,7 +145,12 @@ class _CreateReportPageState extends State<CreateReportPage> {
     try {
       final request = http.MultipartRequest('POST', Uri.parse("$_apiBaseUrl/reports"));
 
-      request.fields['user_id'] = user.id;
+      // --- UPDATED: Add Authorization header ---
+      request.headers['Authorization'] = 'Bearer $token';
+      
+      // --- REMOVED: user_id is no longer needed, backend gets it from token ---
+      // request.fields['user_id'] = user.id; 
+
       request.fields['category'] = _selectedCategory!;
       request.fields['latitude'] = _reportLocation!.latitude.toString();
       request.fields['longitude'] = _reportLocation!.longitude.toString();
@@ -168,7 +174,7 @@ class _CreateReportPageState extends State<CreateReportPage> {
         Navigator.of(context).pop(true);
       } else {
         final error = json.decode(response.body);
-        _showErrorSnackBar(error['detail'] ?? 'Failed to submit report');
+        _showErrorSnackBar(error['detail'] ?? 'Failed to submit report. Status: ${response.statusCode}');
       }
     } catch (e) {
       _showErrorSnackBar('An error occurred: $e');
@@ -463,3 +469,4 @@ class _LocationPickerState extends State<LocationPicker> {
     );
   }
 }
+
