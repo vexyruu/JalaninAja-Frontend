@@ -1,15 +1,11 @@
-import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:location/location.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'config_service.dart';
+
+import 'api_service.dart';
 
 class CreateReportPage extends StatefulWidget {
   const CreateReportPage({super.key});
@@ -27,11 +23,9 @@ class _CreateReportPageState extends State<CreateReportPage> {
   String? _address;
   XFile? _imageFile;
 
-  final String _apiBaseUrl = ConfigService.instance.apiBaseUrl;
-
   final List<String> _categories = [
     'Damaged Sidewalk', 'Blocked by Vendors', 'Illegal Parking',
-    'Flooding / Puddles', 'Construction', 'Other'
+    'Flooding / Puddles', 'Construction', 'No Sidewalk', 'Poor Lighting', 'Other'
   ];
 
   @override
@@ -79,97 +73,58 @@ class _CreateReportPageState extends State<CreateReportPage> {
   Future<void> _getReadableAddress(LatLng location) async {
     setState(() => _address = "Finding address...");
     try {
-      final uri = Uri.parse('$_apiBaseUrl/reverse-geocode?lat=${location.latitude}&lng=${location.longitude}');
-      final response = await http.get(uri);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (mounted) setState(() => _address = data['address']);
-      } else {
-        if (mounted) setState(() => _address = "Could not find address");
-      }
+      final address = await ApiService.instance.reverseGeocode(location.latitude, location.longitude);
+      if (mounted) setState(() => _address = address);
     } catch (e) {
       if (mounted) setState(() => _address = "Could not find address");
     }
   }
 
-  void _showLocationPicker() async {
-    if (_reportLocation == null) {
-      _showErrorSnackBar("Current location not available yet.");
-      return;
-    }
-
-    final LatLng? selectedLocation = await showModalBottomSheet<LatLng>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => LocationPicker(initialLocation: _reportLocation!),
-    );
-
-    if (selectedLocation != null) {
-      setState(() {
-        _reportLocation = selectedLocation;
-      });
-      await _getReadableAddress(selectedLocation);
-    }
-  }
-
-  Future<void> _pickImage(ImageSource source) async {
+  // FIX: This function is now simplified as it only handles one source.
+  Future<void> _takePicture() async {
     final ImagePicker picker = ImagePicker();
     try {
-      final XFile? pickedFile = await picker.pickImage(source: source, imageQuality: 80, maxWidth: 1024);
+      final XFile? pickedFile = await picker.pickImage(source: ImageSource.camera, imageQuality: 80, maxWidth: 1024);
       if (pickedFile != null) {
         setState(() => _imageFile = pickedFile);
       }
     } catch (e) {
-      if(mounted) _showErrorSnackBar('Could not access photos or camera.');
+      if(mounted) _showErrorSnackBar('Could not access camera.');
     }
   }
 
   Future<void> _submitReport() async {
     if (!_formKey.currentState!.validate() || _isSubmitting) return;
     
-    if (_reportLocation == null) {
-      _showErrorSnackBar('Location not found, cannot submit report.');
+    // FIX: Added validation to ensure an image has been selected.
+    if (_imageFile == null) {
+      _showErrorSnackBar('A photo is required to submit a report.');
       return;
     }
-    
-    // --- UPDATED: Now gets the auth token ---
-    final token = Supabase.instance.client.auth.currentSession?.accessToken;
-    if (token == null) {
-      _showErrorSnackBar('You must be logged in to create a report.');
+
+    if (_reportLocation == null) {
+      _showErrorSnackBar('Location not found, cannot submit report.');
       return;
     }
 
     setState(() => _isSubmitting = true);
 
     try {
-      final request = http.MultipartRequest('POST', Uri.parse("$_apiBaseUrl/reports"));
-      request.headers['Authorization'] = 'Bearer $token';
-      request.fields['category'] = _selectedCategory!;
-      request.fields['latitude'] = _reportLocation!.latitude.toString();
-      request.fields['longitude'] = _reportLocation!.longitude.toString();
-      if (_descriptionController.text.isNotEmpty) {
-        request.fields['description'] = _descriptionController.text;
-      }
-
-      if (_imageFile != null) {
-        request.files.add(await http.MultipartFile.fromPath('file', _imageFile!.path));
-      }
-
-      final streamedResponse = await request.send();
-      final response = await http.Response.fromStream(streamedResponse);
+      await ApiService.instance.createReport(
+        category: _selectedCategory!,
+        description: _descriptionController.text,
+        latitude: _reportLocation!.latitude,
+        longitude: _reportLocation!.longitude,
+        imageFile: _imageFile,
+      );
 
       if (!mounted) return;
 
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Report submitted successfully!')),
-        );
-        Navigator.of(context).pop(true);
-      } else {
-        final error = json.decode(response.body);
-        _showErrorSnackBar(error['detail'] ?? 'Failed to submit report. Status: ${response.statusCode}');
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Report submitted successfully! You earned 10 points!')),
+      );
+      Navigator.of(context).pop(true);
+
     } catch (e) {
       _showErrorSnackBar('An error occurred: $e');
     } finally {
@@ -221,7 +176,8 @@ class _CreateReportPageState extends State<CreateReportPage> {
               maxLines: 4,
             ),
             const SizedBox(height: 24),
-            _buildSectionTitle('2. Attach Photo (Optional)', textTheme),
+            // FIX: Updated section title to reflect photo is mandatory.
+            _buildSectionTitle('2. Attach Photo', textTheme),
             const SizedBox(height: 16),
             _buildPhotoPicker(),
             const SizedBox(height: 24),
@@ -301,29 +257,24 @@ class _CreateReportPageState extends State<CreateReportPage> {
         border: Border.all(color: Colors.grey.shade300)
       ),
       child: _imageFile == null
+          // FIX: Simplified the UI to only show one button for taking a picture.
           ? Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Icon(Icons.camera_alt_outlined, color: Colors.grey, size: 40),
                 const SizedBox(height: 8),
-                Text('Add a photo of the issue', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey[600])),
+                Text('A photo of the issue is required', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey[600])),
                 const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.camera_alt),
-                      label: const Text('Camera'),
-                      onPressed: () => _pickImage(ImageSource.camera),
-                    ),
-                    const SizedBox(width: 16),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.photo_library),
-                      label: const Text('Gallery'),
-                      onPressed: () => _pickImage(ImageSource.gallery),
-                    ),
-                  ],
-                )
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Take Picture'),
+                  onPressed: _takePicture,
+                   style: ElevatedButton.styleFrom(
+                    foregroundColor: Theme.of(context).primaryColor,
+                    backgroundColor: Colors.white,
+                    side: BorderSide(color: Theme.of(context).primaryColor),
+                  ),
+                ),
               ],
             )
           : Stack(
@@ -365,99 +316,8 @@ class _CreateReportPageState extends State<CreateReportPage> {
         leading: const Icon(Icons.location_on, color: Colors.green, size: 28),
         title: Text('Report Location', style: textTheme.titleSmall),
         subtitle: Text(_address ?? 'Getting location...', style: textTheme.bodySmall?.copyWith(color: Colors.grey[600])),
-        trailing: IconButton(
-          icon: const Icon(Icons.edit_location_alt_outlined),
-          onPressed: _showLocationPicker,
-          tooltip: 'Change Location',
-        ),
-      ),
-    );
-  }
-}
-
-class LocationPicker extends StatefulWidget {
-  final LatLng initialLocation;
-  const LocationPicker({super.key, required this.initialLocation});
-
-  @override
-  State<LocationPicker> createState() => _LocationPickerState();
-}
-
-class _LocationPickerState extends State<LocationPicker> {
-  late LatLng _pickedLocation;
-  
-  @override
-  void initState() {
-    super.initState();
-    _pickedLocation = widget.initialLocation;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: MediaQuery.of(context).size.height * 0.75,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(20),
-          topRight: Radius.circular(20),
-        ),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Text(
-              'Move the map to select a location',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-          ),
-          Expanded(
-            child: Stack(
-              children: [
-                GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: widget.initialLocation,
-                    zoom: 17,
-                  ),
-                  onCameraMove: (CameraPosition position) {
-                    setState(() {
-                      _pickedLocation = position.target;
-                    });
-                  },
-                  gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-                     Factory<PanGestureRecognizer>(() => PanGestureRecognizer()),
-                     Factory<ScaleGestureRecognizer>(() => ScaleGestureRecognizer()),
-                     Factory<TapGestureRecognizer>(() => TapGestureRecognizer()),
-                     Factory<VerticalDragGestureRecognizer>(() => VerticalDragGestureRecognizer()),
-                  },
-                ),
-                const Center(
-                  child: Padding(
-                    padding: EdgeInsets.only(bottom: 40.0),
-                    child: Icon(
-                      Icons.location_pin,
-                      size: 40,
-                      color: Colors.red,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size(double.infinity, 50),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop(_pickedLocation);
-              },
-              child: const Text('Confirm Location'),
-            ),
-          ),
-        ],
+        // FIX: Removed the trailing IconButton to prevent location changes.
+        trailing: null,
       ),
     );
   }

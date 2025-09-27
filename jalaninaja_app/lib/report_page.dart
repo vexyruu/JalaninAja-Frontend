@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter_typeahead/flutter_typeahead.dart';
+
+import 'widgets/report_card.dart';
+import 'api_service.dart';
 import 'create_report_page.dart';
-import 'config_service.dart';
+import 'models.dart' as app_models;
+import 'report_detail_page.dart';
+
+enum LeaderboardPeriod { week, month, year }
 
 class ReportPage extends StatelessWidget {
   const ReportPage({super.key});
@@ -14,7 +18,8 @@ class ReportPage extends StatelessWidget {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Community'),
+          title: Image.asset('assets/JalaninAjaLogoNoBG.png', height: 24),
+          centerTitle: true,
           automaticallyImplyLeading: false,
           bottom: TabBar(
             labelStyle: Theme.of(context).textTheme.titleSmall,
@@ -24,10 +29,10 @@ class ReportPage extends StatelessWidget {
             ],
           ),
         ),
-        body: TabBarView(
+        body: const TabBarView(
           children: [
-            CommunityReportsTab(apiBaseUrl: ConfigService.instance.apiBaseUrl),
-            LeaderboardTab(apiBaseUrl: ConfigService.instance.apiBaseUrl),
+            CommunityReportsTab(),
+            LeaderboardTab(),
           ],
         ),
       ),
@@ -37,8 +42,7 @@ class ReportPage extends StatelessWidget {
 
 // TAB 1: COMMUNITY REPORTS
 class CommunityReportsTab extends StatefulWidget {
-  final String apiBaseUrl;
-  const CommunityReportsTab({super.key, required this.apiBaseUrl});
+  const CommunityReportsTab({super.key});
 
   @override
   State<CommunityReportsTab> createState() => _CommunityReportsTabState();
@@ -46,114 +50,147 @@ class CommunityReportsTab extends StatefulWidget {
 
 class _CommunityReportsTabState extends State<CommunityReportsTab> {
   final ScrollController _scrollController = ScrollController();
+  final TextEditingController _searchController = TextEditingController();
+
   int _page = 0;
-  bool _isLoadingMore = false;
-  List<dynamic> _reports = [];
+  bool _hasMore = true;
+  bool _isLoading = true;
+  bool _isVoting = false;
+  List<app_models.Report> _reports = [];
+
+  bool _isSearching = false;
+  String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
-    _fetchReports(0);
+    _fetchInitialReports();
     _scrollController.addListener(_onScroll);
+    _searchController.addListener(() {
+      setState(() {
+        _searchQuery = _searchController.text;
+      });
+    });
   }
 
   @override
   void dispose() {
     _scrollController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
-  
+
   void _onScroll() {
-    if (_scrollController.position.pixels == _scrollController.position.maxScrollExtent && !_isLoadingMore) {
-      _page++;
-      _fetchReports(_page);
+    if (_isSearching) return;
+
+    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200 &&
+        !_isLoading && _hasMore) {
+      _fetchMoreReports();
     }
   }
 
-  Future<void> _fetchReports(int page) async {
-    if (_isLoadingMore) return;
+  Future<void> _fetchInitialReports() async {
     setState(() {
-      _isLoadingMore = true;
+      _page = 0;
+      _isLoading = true;
+      _hasMore = true;
+      _isSearching = false;
     });
-    const int limit = 10;
-    final offset = page * limit;
     try {
-      final response = await http.get(Uri.parse('${widget.apiBaseUrl}/reports?offset=$offset&limit=$limit'));
-      if (response.statusCode == 200) {
-        final newReports = json.decode(response.body) as List;
-        setState(() {
-          if (page == 0) {
-            _reports = newReports;
-          } else {
-            _reports.addAll(newReports);
-          }
-        });
-      } else {
-        throw Exception('Failed to load reports');
-      }
+      final newReports = await ApiService.instance.getReports(page: 0);
+      setState(() {
+        _reports = newReports;
+        if (newReports.length < 10) _hasMore = false;
+      });
     } catch (e) {
-      debugPrint('Error fetching reports: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not connect to the server.')),
-        );
-      }
+      _showErrorSnackBar('Could not fetch reports: $e');
     } finally {
+      if(mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _fetchMoreReports() async {
+    setState(() => _isLoading = true);
+    _page++;
+    try {
+      final newReports = await ApiService.instance.getReports(page: _page);
       setState(() {
-        _isLoadingMore = false;
+        _reports.addAll(newReports);
+        if (newReports.length < 10) _hasMore = false;
       });
+    } catch (e) {
+      _showErrorSnackBar('Could not fetch more reports: $e');
+      _page--;
+    } finally {
+      if(mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _refreshReports() async {
-    _page = 0;
-    await _fetchReports(0);
-  }
-
-  Future<void> _upvoteReport(int reportId) async {
-    final token = Supabase.instance.client.auth.currentSession?.accessToken;
-    if (token == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You must be logged in to upvote.')));
-      return;
-    }
-
-    final reportIndex = _reports.indexWhere((report) => report['report_id'] == reportId);
-    if (reportIndex == -1) return;
-
-    final originalUpvoteCount = _reports[reportIndex]['upvote_count'];
-
+  Future<void> _performSearch(String query) async {
+    if (query.isEmpty) return;
+    FocusScope.of(context).unfocus();
     setState(() {
-      _reports[reportIndex]['upvote_count'] = originalUpvoteCount + 1;
+      _isLoading = true;
+      _isSearching = true;
+      _hasMore = false;
     });
+    try {
+      final searchResults = await ApiService.instance.searchReportsByLocation(query);
+      setState(() {
+        _reports = searchResults;
+      });
+    } catch (e) {
+      _showErrorSnackBar('Search failed: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    FocusScope.of(context).unfocus();
+    _fetchInitialReports();
+  }
+  
+  Future<void> _handleRefresh() async {
+    _searchController.clear();
+    await _fetchInitialReports();
+  }
+
+  Future<void> _vote(int reportId, Future<void> Function(int) apiCall) async {
+    if (_isVoting) return;
+    setState(() => _isVoting = true);
 
     try {
-      final response = await http.post(
-        Uri.parse('${widget.apiBaseUrl}/reports/$reportId/upvote'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      );
-      
-      if (!mounted) return;
-
-      if (response.statusCode != 200) {
-        setState(() {
-          _reports[reportIndex]['upvote_count'] = originalUpvoteCount;
-        });
-        final error = json.decode(response.body);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: ${error['detail']}')));
-      } else {
-         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Upvote successful!')));
-      }
+      await apiCall(reportId);
+      _showSuccessSnackBar('Vote registered!');
+      _handleRefresh(); 
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _reports[reportIndex]['upvote_count'] = originalUpvoteCount;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('An error occurred: $e')));
+      _showErrorSnackBar('Vote failed: $e');
+    } finally {
+      if(mounted) setState(() => _isVoting = false);
     }
+  }
+
+  void _navigateToDetail(app_models.Report report) async {
+    final result = await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => ReportDetailPage(initialReport: report),
+      ),
+    );
+    if (result == true) {
+      _handleRefresh();
+    }
+  }
+  
+  void _showErrorSnackBar(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), backgroundColor: Colors.red));
+  }
+  
+  void _showSuccessSnackBar(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), backgroundColor: Colors.green));
   }
 
   @override
@@ -161,26 +198,35 @@ class _CommunityReportsTabState extends State<CommunityReportsTab> {
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: RefreshIndicator(
-        onRefresh: _refreshReports,
-        child: _reports.isEmpty && !_isLoadingMore
-            ? const Center(child: Text('No reports yet. Be the first to post!'))
-            : ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.all(16),
-                itemCount: _reports.length + (_isLoadingMore ? 1 : 0),
-                itemBuilder: (context, index) {
-                  if (index == _reports.length) {
-                    return const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(8.0),
-                        child: CircularProgressIndicator(),
-                      ),
-                    );
-                  }
-                  final report = _reports[index];
-                  return _buildReportCard(report, context);
-                },
-              ),
+        onRefresh: _handleRefresh,
+        child: Column(
+          children: [
+            _buildSearchBar(),
+            Expanded(
+              child: (_reports.isEmpty && !_isLoading)
+                  ? Center(child: Text(_isSearching ? 'No reports found for "$_searchQuery".' : 'No reports yet. Be the first to post!'))
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: _reports.length + (_isLoading ? 1 : 0),
+                      itemBuilder: (context, index) {
+                        if (index == _reports.length) {
+                          return _hasMore && !_isSearching
+                            ? const Center(child: Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator()))
+                            : (_isSearching ? const SizedBox.shrink() : const Center(child: Padding(padding: EdgeInsets.all(16.0), child: Text("You've reached the end."))));
+                        }
+                        final report = _reports[index];
+                        return ReportCard(
+                          report: report,
+                          onTap: () => _navigateToDetail(report),
+                          onUpvote: () => _vote(report.reportId, ApiService.instance.upvoteReport),
+                          // FIX: Removed the onDownvote parameter as it no longer exists
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
@@ -188,7 +234,7 @@ class _CommunityReportsTabState extends State<CommunityReportsTab> {
             MaterialPageRoute(builder: (context) => const CreateReportPage()),
           );
           if (result == true && mounted) {
-            _refreshReports();
+            _fetchInitialReports();
           }
         },
         backgroundColor: Theme.of(context).colorScheme.primary,
@@ -199,192 +245,181 @@ class _CommunityReportsTabState extends State<CommunityReportsTab> {
     );
   }
 
-  String _getUserLevel(int points) {
-    if (points >= 1500) return "Legenda Gotong Royong";
-    if (points >= 750) return "Jawara Jalan";
-    if (points >= 300) return "Pelopor Trotoar";
-    if (points >= 100) return "Penjelajah Kota";
-    return "Pejalan Kaki";
-  }
-
-  Widget _buildReportCard(Map<String, dynamic> report, BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    final userName = report['Users']?['name'] ?? 'Anonymous';
-    final userPoints = report['Users']?['points'] ?? 0;
-    final avatarUrl = report['Users']?['avatar_url'];
-    final category = report['category'] ?? 'No Category';
-    final userLevel = _getUserLevel(userPoints);
-
-    return Card(
-      elevation: 0,
-      color: Colors.white,
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: Colors.grey.shade300)
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                CircleAvatar(
-                  radius: 20,
-                  backgroundColor: Colors.grey.shade200,
-                  backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-                  child: avatarUrl == null
-                      ? const Icon(Icons.person, color: Colors.grey)
-                      : null,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(userName, style: textTheme.titleSmall),
-                      const SizedBox(height: 2),
-                      Text(
-                        '$userLevel - $userPoints Points',
-                        style: textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-                if (userPoints >= 100)
-                  const Icon(Icons.verified, color: Colors.amber, size: 20),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (report['photo_url'] != null)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.network(
-                  report['photo_url'],
-                  height: 180,
-                  width: double.infinity,
-                  fit: BoxFit.cover,
-                  errorBuilder: (c, e, s) => Container(
-                    height: 180,
-                    color: Colors.grey[200],
-                    child: const Icon(Icons.broken_image, color: Colors.grey),
-                  ),
-                ),
+  Widget _buildSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      child: TypeAheadField<app_models.PlaceAutocomplete>(
+        controller: _searchController,
+        suggestionsCallback: (pattern) async {
+          if (pattern.trim().isEmpty) return [];
+          return await ApiService.instance.autocompleteAddress(pattern);
+        },
+        itemBuilder: (context, suggestion) {
+          return ListTile(
+            leading: const Icon(Icons.location_on_outlined),
+            title: Text(suggestion.mainText),
+            subtitle: Text(suggestion.secondaryText),
+          );
+        },
+        onSelected: (suggestion) {
+          _searchController.text = suggestion.description;
+          _performSearch(suggestion.description);
+        },
+        builder: (context, controller, focusNode) {
+          return TextField(
+            controller: controller,
+            focusNode: focusNode,
+            onSubmitted: (value) {
+              _performSearch(value);
+            },
+            decoration: InputDecoration(
+              hintText: 'Search by location (e.g., "Surabaya")',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _searchController.text.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () => _clearSearch(),
+                    )
+                  : null,
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16.0),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(30.0),
+                borderSide: BorderSide(color: Colors.grey.shade300),
               ),
-            const SizedBox(height: 12),
-            Text(category, style: textTheme.titleSmall),
-            const SizedBox(height: 4),
-            Text(report['description'] ?? 'No description provided', style: textTheme.bodyMedium),
-            const Divider(height: 24),
-            Row(
-              children: [
-                const Icon(Icons.location_on_outlined, color: Colors.grey, size: 16),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    report['address'] ?? 'Address not available',
-                    style: textTheme.bodySmall,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                TextButton.icon(
-                  onPressed: () => _upvoteReport(report['report_id']),
-                  icon: const Icon(Icons.thumb_up_alt_outlined, size: 16),
-                  label: Text((report['upvote_count'] ?? 0).toString()),
-                  style: TextButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.primary,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                      side: BorderSide(color: Colors.grey.shade300)
-                    ),
-                  ),
-                ),
-              ],
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(30.0),
+                borderSide: BorderSide(color: Colors.grey.shade300),
+              ),
             ),
-          ],
+          );
+        },
+        emptyBuilder: (context) => const Padding(
+          padding: EdgeInsets.all(12.0),
+          child: Text('No matching locations found.'),
         ),
       ),
     );
   }
 }
 
-//  TAB 2: LEADERBOARD
 class LeaderboardTab extends StatefulWidget {
-  final String apiBaseUrl;
-  const LeaderboardTab({super.key, required this.apiBaseUrl});
+  const LeaderboardTab({super.key});
 
   @override
   State<LeaderboardTab> createState() => _LeaderboardTabState();
 }
 
 class _LeaderboardTabState extends State<LeaderboardTab> {
-  late Future<List<dynamic>> _leaderboardFuture;
+  LeaderboardPeriod _selectedPeriod = LeaderboardPeriod.week;
+  late Future<List<app_models.User>> _leaderboardFuture;
+  
+  final Map<LeaderboardPeriod, String> _periodApiMap = {
+    LeaderboardPeriod.week: 'week',
+    LeaderboardPeriod.month: 'month',
+    LeaderboardPeriod.year: 'year',
+  };
 
   @override
   void initState() {
     super.initState();
-    _leaderboardFuture = _fetchLeaderboard();
+    _fetchLeaderboard();
+  }
+  
+  void _fetchLeaderboard() {
+    setState(() {
+      _leaderboardFuture = ApiService.instance.getLeaderboard(
+        period: _periodApiMap[_selectedPeriod]!,
+      );
+    });
   }
 
-  Future<List<dynamic>> _fetchLeaderboard() async {
-    try {
-      final response = await http.get(Uri.parse('${widget.apiBaseUrl}/leaderboard'));
-      if (response.statusCode == 200) {
-        return json.decode(response.body);
-      } else {
-        throw Exception('Failed to load leaderboard');
-      }
-    } catch (e) {
-      debugPrint('Error fetching leaderboard: $e');
-      throw Exception('Could not connect to the server.');
-    }
+  Widget _buildPeriodSelector() {
+    final Map<LeaderboardPeriod, String> periodLabels = {
+      LeaderboardPeriod.week: 'This Week',
+      LeaderboardPeriod.month: 'This Month',
+      LeaderboardPeriod.year: 'This Year',
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 16.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: periodLabels.keys.map((period) {
+          final isSelected = _selectedPeriod == period;
+          return ChoiceChip(
+            label: Text(periodLabels[period]!),
+            selected: isSelected,
+            onSelected: (selected) {
+              if (selected) {
+                setState(() {
+                  _selectedPeriod = period;
+                  _fetchLeaderboard();
+                });
+              }
+            },
+            labelStyle: TextStyle(
+              color: isSelected ? Colors.white : Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.bold,
+            ),
+            selectedColor: Theme.of(context).colorScheme.primary,
+            backgroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20.0),
+              side: BorderSide(
+                color: Theme.of(context).colorScheme.primary,
+                width: 1.5,
+              ),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          );
+        }).toList(),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: FutureBuilder<List<dynamic>>(
-        future: _leaderboardFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          } else if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
-            return const Center(child: Text('The leaderboard is empty.'));
-          }
+      body: Column(
+        children: [
+          _buildPeriodSelector(),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: () async => _fetchLeaderboard(),
+              child: FutureBuilder<List<app_models.User>>(
+                future: _leaderboardFuture,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  } else if (snapshot.hasError) {
+                    return Center(child: Text('Error: ${snapshot.error}'));
+                  } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                    return const Center(child: Text('The leaderboard for this period is empty.'));
+                  }
 
-          final leaderboard = snapshot.data!;
-          return RefreshIndicator(
-             onRefresh: () async {
-                setState(() {
-                  _leaderboardFuture = _fetchLeaderboard();
-                });
-              },
-            child: ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: leaderboard.length,
-              itemBuilder: (context, index) {
-                final user = leaderboard[index];
-                return _buildLeaderboardCard(user, index + 1, context);
-              },
+                  final leaderboard = snapshot.data!;
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    itemCount: leaderboard.length,
+                    itemBuilder: (context, index) {
+                      final user = leaderboard[index];
+                      return _buildLeaderboardCard(user, index + 1, context);
+                    },
+                  );
+                },
+              ),
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildLeaderboardCard(Map<String, dynamic> user, int rank, BuildContext context) {
+  Widget _buildLeaderboardCard(app_models.User user, int rank, BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    final avatarUrl = user['avatar_url'];
-    final points = user['points'] ?? 0;
     
     final Map<int, Color> rankColors = {
       1: const Color(0xFFFFD700), // Gold
@@ -394,12 +429,13 @@ class _LeaderboardTabState extends State<LeaderboardTab> {
     final rankColor = rankColors[rank];
 
     return Card(
-      elevation: 0,
+      elevation: 2,
+      shadowColor: Colors.black.withOpacity(0.05),
       color: Colors.white,
       margin: const EdgeInsets.symmetric(vertical: 6),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: rankColor ?? Colors.grey.shade300)
+        side: BorderSide(color: rankColor ?? Colors.transparent, width: 1.5)
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
@@ -414,9 +450,9 @@ class _LeaderboardTabState extends State<LeaderboardTab> {
             CircleAvatar(
               radius: 24,
               backgroundColor: Colors.grey.shade300,
-              backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-              child: avatarUrl == null
-                  ? const Icon(Icons.person, color: Colors.white)
+              backgroundImage: user.avatarUrl != null ? NetworkImage(user.avatarUrl!) : null,
+              child: user.avatarUrl == null
+                  ? Text(user.name.isNotEmpty ? user.name[0].toUpperCase() : '?', style: textTheme.titleLarge?.copyWith(color: Colors.white))
                   : null,
             ),
             const SizedBox(width: 12),
@@ -424,8 +460,8 @@ class _LeaderboardTabState extends State<LeaderboardTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(user['name'] ?? 'Anonymous', style: textTheme.titleSmall),
-                  Text('$points points', style: textTheme.bodySmall),
+                  Text(user.name, style: textTheme.titleSmall),
+                  Text('${user.points} points', style: textTheme.bodySmall),
                 ],
               ),
             ),
@@ -438,3 +474,4 @@ class _LeaderboardTabState extends State<LeaderboardTab> {
     );
   }
 }
+

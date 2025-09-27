@@ -1,14 +1,16 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:location/location.dart';
 import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:flutter_typeahead/flutter_typeahead.dart';
-import 'config_service.dart'; 
+
+import 'api_service.dart';
+import 'models.dart' as app_models;
+import 'report_detail_page.dart';
+import 'widgets/report_card.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -28,17 +30,17 @@ class _MapScreenState extends State<MapScreen> {
   bool _isSearchCardExpanded = false;
   String _selectedMode = "distance_walkability";
 
-  List<Map<String, dynamic>> _routeAlternatives = [];
+  List<app_models.RouteAlternative> _routeAlternatives = [];
   int _selectedRouteIndex = -1;
   Set<Polyline> _polylines = {};
   Set<Marker> _markers = {};
   
+  app_models.AnalyzedPoint? _selectedPoint;
+  
   String? _mapStyle;
   String? _jobId;
   Timer? _pollingTimer;
-
-  final String _googleApiKey = ConfigService.instance.googleMapsApiKey;
-  final String _apiBaseUrl = ConfigService.instance.apiBaseUrl;
+  bool _isShowingBottomSheet = false;
 
   @override
   void initState() {
@@ -58,86 +60,54 @@ class _MapScreenState extends State<MapScreen> {
     super.dispose();
   }
 
-  Future<String?> _getReadableAddress(LatLng location) async {
-    try {
-      final uri = Uri.parse('$_apiBaseUrl/reverse-geocode?lat=${location.latitude}&lng=${location.longitude}');
-      final response = await http.get(uri);
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        return data['address'];
-      }
-    } catch (e) {
-      print("Error getting readable address: $e");
-    }
-    return null;
-  }
-
   Future<void> _getCurrentLocation() async {
     Location location = Location();
-    bool serviceEnabled;
-    PermissionStatus permissionGranted;
-    LocationData locationData;
-
-    serviceEnabled = await location.serviceEnabled();
-    if (!serviceEnabled) {
-      serviceEnabled = await location.requestService();
-      if (!serviceEnabled) return;
-    }
-
-    permissionGranted = await location.hasPermission();
-    if (permissionGranted == PermissionStatus.denied) {
-      permissionGranted = await location.requestPermission();
-      if (permissionGranted != PermissionStatus.granted) return;
-    }
-
-    locationData = await location.getLocation();
-    if (locationData.latitude != null && locationData.longitude != null) {
-      final currentLatLng = LatLng(locationData.latitude!, locationData.longitude!);
-      setState(() {
-        _currentLocation = currentLatLng;
-        _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_currentLocation!, 15.0));
-      });
-      
-      final address = await _getReadableAddress(currentLatLng);
-      if (address != null && mounted) {
-        setState(() {
-          _originController.text = address;
-        });
-      } else {
-        setState(() {
-          _originController.text = "Lokasi Saat Ini";
-        });
+    try {
+      bool serviceEnabled = await location.serviceEnabled();
+      if (!serviceEnabled) {
+        serviceEnabled = await location.requestService();
+        if (!serviceEnabled) return;
       }
+      PermissionStatus permissionGranted = await location.hasPermission();
+      if (permissionGranted == PermissionStatus.denied) {
+        permissionGranted = await location.requestPermission();
+        if (permissionGranted != PermissionStatus.granted) return;
+      }
+
+      final locationData = await location.getLocation();
+      if (locationData.latitude != null && locationData.longitude != null) {
+        final currentLatLng = LatLng(locationData.latitude!, locationData.longitude!);
+        setState(() {
+          _currentLocation = currentLatLng;
+          _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_currentLocation!, 15.0));
+        });
+        
+        final address = await ApiService.instance.reverseGeocode(currentLatLng.latitude, currentLatLng.longitude);
+        if (mounted) {
+          setState(() => _originController.text = address);
+        }
+      }
+    } catch (e) {
+        print("Error getting location: $e");
+        if(mounted) {
+          setState(() => _originController.text = "Current Location");
+        }
     }
   }
 
-  Future<List<Map<String, dynamic>>> _fetchAddressSuggestions(String pattern) async {
-    if (pattern.trim().isEmpty) {
-      return [];
-    }
-    final Uri url = Uri.parse("$_apiBaseUrl/autocomplete-address?query=${Uri.encodeComponent(pattern)}");
-
-    try {
-      final response = await http.get(url);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final predictions = data['predictions'] as List;
-        return predictions.cast<Map<String, dynamic>>();
-      } else {
-        print('Failed to load address suggestions: ${response.statusCode}');
-        return [];
-      }
-    } catch (e) {
-      print('Error fetching address suggestions: $e');
-      return [];
-    }
+  Future<List<app_models.PlaceAutocomplete>> _fetchAddressSuggestions(String pattern) async {
+      if (pattern.trim().isEmpty) return [];
+      return await ApiService.instance.autocompleteAddress(
+        pattern,
+        lat: _currentLocation?.latitude,
+        lng: _currentLocation?.longitude,
+      );
   }
 
   Future<void> _getRoute() async {
     if (_originController.text.isEmpty || _destinationController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Harap isi alamat awal dan tujuan')),
+        const SnackBar(content: Text('Please fill in origin and destination')),
       );
       return;
     }
@@ -149,79 +119,102 @@ class _MapScreenState extends State<MapScreen> {
       _polylines = {};
       _routeAlternatives = [];
       _selectedRouteIndex = -1;
+      _selectedPoint = null;
       _pollingTimer?.cancel();
     });
 
     try {
-      final Uri apiUrl = Uri.parse("$_apiBaseUrl/calculate-routes");
-      
-      final response = await http.post(
-        apiUrl,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'origin_address': _originController.text,
-          'destination_address': _destinationController.text,
-          'mode': _selectedMode,
-        }),
+      _jobId = await ApiService.instance.calculateRoute(
+        origin: _originController.text,
+        destination: _destinationController.text,
+        mode: _selectedMode,
       );
-
-      if (response.statusCode == 202) {
-        final data = json.decode(response.body);
-        _jobId = data['job_id'];
-        
-        if (_jobId != null) {
-          setState(() {
-            _loadingMessage = 'Analyzing walkability...';
-            _isSearchCardExpanded = false;
-          });
-          _pollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
-            _pollRouteStatus(_jobId!);
-          });
-        }
+      
+      if (_jobId != null) {
+        setState(() {
+          _loadingMessage = 'Analyzing walkability...';
+          _isSearchCardExpanded = false;
+        });
+        _pollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+          _pollRouteStatus(_jobId!);
+        });
       } else {
-        final error = json.decode(response.body);
-        _showErrorAndStopLoading('Error: ${error['detail'] ?? 'Failed to start route calculation'}');
+        _showErrorAndStopLoading('Failed to start route calculation.');
       }
     } catch (e) {
       _showErrorAndStopLoading('An error occurred: $e');
     }
   }
 
+  double _calculateWalkabilityScoreForPoint(app_models.AnalyzedPoint point, String mode) {
+    double score = 50.0;
+    if (point.detectedLabels.contains('sidewalk')) {
+      score += 20;
+      double dynamicBonus = min(point.sidewalkArea, 25);
+      score += dynamicBonus;
+    } else {
+      if (point.isResidential) {
+        score -= 15;
+      } else {
+        score -= 30;
+      }
+    }
+
+    if (mode == 'shady_route') {
+      score += min(point.treeCount * 5, 20);
+    }
+
+    return max(0, min(100, score));
+  }
+
+  List<app_models.RouteAlternative> _recalculateScoresForAlternatives(
+    List<app_models.RouteAlternative> alternatives,
+    String mode
+  ) {
+    for (var route in alternatives) {
+      double totalScore = 0;
+      if (route.pointsAnalyzed.isEmpty) {
+        route.averageWalkabilityScore = 0;
+        continue;
+      }
+      
+      for (var point in route.pointsAnalyzed) {
+        point.walkabilityScore = _calculateWalkabilityScoreForPoint(point, mode);
+        totalScore += point.walkabilityScore;
+      }
+      
+      route.averageWalkabilityScore = totalScore / route.pointsAnalyzed.length;
+    }
+    return alternatives;
+  }
+
   Future<void> _pollRouteStatus(String jobId) async {
     try {
-      final Uri statusUrl = Uri.parse("$_apiBaseUrl/routes/status/$jobId");
-      final response = await http.get(statusUrl);
+      final result = await ApiService.instance.pollRouteStatus(jobId);
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final status = data['status'];
-
-        if (status == 'completed') {
-          _pollingTimer?.cancel();
-          final alternatives = data['data'] as List;
-
-          if (alternatives.isNotEmpty) {
-            alternatives.sort((a, b) => (b['average_walkability_score'] as num).compareTo(a['average_walkability_score'] as num));
-            setState(() {
-              _routeAlternatives = alternatives.take(3).map((e) => e as Map<String, dynamic>).toList();
-              _isLoading = false;
-            });
-            _selectRoute(0);
-          } else {
-            _showErrorAndStopLoading('No suitable routes were found.');
-          }
-
-        } else if (status == 'failed') {
-          _pollingTimer?.cancel();
-          final error = data['error'] ?? 'Route analysis failed.';
-          _showErrorAndStopLoading('Error: $error');
-
-        } else {
-          print('Route analysis status: $status');
-        }
-      } else {
+      if (result.status == 'completed') {
         _pollingTimer?.cancel();
-        _showErrorAndStopLoading('Failed to get route status.');
+        List<app_models.RouteAlternative>? alternatives = result.data;
+
+        if (alternatives != null && alternatives.isNotEmpty) {
+          
+          alternatives = _recalculateScoresForAlternatives(alternatives, _selectedMode);
+          
+          alternatives.sort((a, b) => b.averageWalkabilityScore.compareTo(a.averageWalkabilityScore));
+
+          setState(() {
+            _routeAlternatives = alternatives!.take(3).toList();
+            _isLoading = false;
+          });
+          _selectRoute(0);
+        } else {
+          _showErrorAndStopLoading('No suitable routes were found.');
+        }
+
+      } else if (result.status == 'failed') {
+        _pollingTimer?.cancel();
+        final error = result.error ?? 'Route analysis failed.';
+        _showErrorAndStopLoading('Error: $error');
       }
     } catch (e) {
       _pollingTimer?.cancel();
@@ -232,18 +225,14 @@ class _MapScreenState extends State<MapScreen> {
   void _showErrorAndStopLoading(String message) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
   
   void _displaySelectedRoutePolyline() {
     Set<Polyline> newPolylines = {};
     if (_selectedRouteIndex == -1 || _routeAlternatives.isEmpty) {
-      setState(() {
-        _polylines = newPolylines;
-      });
+      setState(() => _polylines = newPolylines);
       return;
     }
 
@@ -251,7 +240,7 @@ class _MapScreenState extends State<MapScreen> {
     final PolylinePoints polylinePoints = PolylinePoints();
     final route = _routeAlternatives[_selectedRouteIndex];
 
-    final List<PointLatLng> result = polylinePoints.decodePolyline(route['overview_polyline']);
+    final List<PointLatLng> result = polylinePoints.decodePolyline(route.overviewPolyline);
     final List<LatLng> polylineCoordinates = result.map((point) => LatLng(point.latitude, point.longitude)).toList();
 
     newPolylines.add(Polyline(
@@ -261,9 +250,7 @@ class _MapScreenState extends State<MapScreen> {
       points: polylineCoordinates,
     ));
 
-    setState(() {
-      _polylines = newPolylines;
-    });
+    setState(() => _polylines = newPolylines);
   }
 
   Future<void> _selectRoute(int index) async {
@@ -271,20 +258,21 @@ class _MapScreenState extends State<MapScreen> {
 
     setState(() {
       _selectedRouteIndex = index;
+      _selectedPoint = null;
     });
 
     _displaySelectedRoutePolyline();
 
     final selectedRoute = _routeAlternatives[index];
-    final points = selectedRoute['points_analyzed'] as List;
+    final points = selectedRoute.pointsAnalyzed;
     final List<Color> colors = [Colors.green, Colors.amber, Colors.red];
     final Color routeColor = colors[index];
     
     Set<Marker> newMarkers = {};
 
     if (points.isNotEmpty) {
-      final polylineCoordinates = PolylinePoints().decodePolyline(selectedRoute['overview_polyline']).map((p) => LatLng(p.latitude, p.longitude)).toList();
-       if (polylineCoordinates.isNotEmpty) {
+      final polylineCoordinates = PolylinePoints().decodePolyline(selectedRoute.overviewPolyline).map((p) => LatLng(p.latitude, p.longitude)).toList();
+      if (polylineCoordinates.isNotEmpty) {
           newMarkers.add(Marker(
             markerId: const MarkerId('start'),
             position: polylineCoordinates.first,
@@ -293,89 +281,232 @@ class _MapScreenState extends State<MapScreen> {
           newMarkers.add(Marker(
             markerId: const MarkerId('end'),
             position: polylineCoordinates.last,
-            icon: await _createCustomMarker(Colors.grey),
+            icon: await _createCustomMarker(Colors.grey.shade700, isEnd: true),
           ));
           _mapController?.animateCamera(CameraUpdate.newLatLngBounds(_createLatLngBounds(polylineCoordinates), 50));
-       }
+      }
     }
     
     await _addPointOfInterestMarkers(newMarkers, points, routeColor);
 
-    setState(() {
-      _markers = newMarkers;
-    });
+    setState(() => _markers = newMarkers);
   }
 
-  Future<void> _addPointOfInterestMarkers(Set<Marker> markers, List<dynamic> points, Color color) async {
+  Future<void> _addPointOfInterestMarkers(Set<Marker> markers, List<app_models.AnalyzedPoint> points, Color color) async {
     for (var point in points) {
       markers.add(
         Marker(
-          markerId: MarkerId('${point['latitude']}-${point['longitude']}'),
-          position: LatLng(
-            (point['latitude'] as num).toDouble(),
-            (point['longitude'] as num).toDouble()
-          ),
-          icon: await _createCustomMarker(color.withOpacity(0.7)),
-          infoWindow: InfoWindow(
-            title: 'Skor: ${point['walkability_score']}',
-          ),
+          markerId: MarkerId('${point.latitude}-${point.longitude}'),
+          position: LatLng(point.latitude, point.longitude),
+          icon: await _createCustomMarker(color),
+          onTap: () {
+            setState(() => _selectedPoint = point);
+          }
         ),
       );
     }
   }
 
   LatLngBounds _createLatLngBounds(List<LatLng> points) {
-    double? minLat, maxLat, minLng, maxLng;
-
+    double minLat = points.first.latitude, maxLat = points.first.latitude;
+    double minLng = points.first.longitude, maxLng = points.first.longitude;
     for (final point in points) {
-      if (minLat == null || point.latitude < minLat) minLat = point.latitude;
-      if (maxLat == null || point.latitude > maxLat) maxLat = point.latitude;
-      if (minLng == null || point.longitude < minLng) minLng = point.longitude;
-      if (maxLng == null || point.longitude > maxLng) maxLng = point.longitude;
+      if (point.latitude < minLat) minLat = point.latitude;
+      if (point.latitude > maxLat) maxLat = point.latitude;
+      if (point.longitude < minLng) minLng = point.longitude;
+      if (point.longitude > maxLng) maxLng = point.longitude;
     }
-
-    return LatLngBounds(
-      southwest: LatLng(minLat!, minLng!),
-      northeast: LatLng(maxLat!, maxLng!),
-    );
+    return LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng));
   }
 
-  Future<BitmapDescriptor> _createCustomMarker(Color color, {bool isStart = false}) async {
+  Future<BitmapDescriptor> _createCustomMarker(Color color, {bool isStart = false, bool isEnd = false}) async {
     final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(pictureRecorder);
-    final Paint paint = Paint()..color = color;
-    const double radius = 20.0;
+    const double radius = 22.0;
+    final Offset center = const Offset(radius, radius);
+    final double imageSize = (radius * 2) + 4; // Add padding for shadow
 
-    canvas.drawCircle(const Offset(radius, radius), radius, paint..color = color.withOpacity(0.3));
-    canvas.drawCircle(const Offset(radius, radius), radius / (isStart ? 1.5 : 2.5), paint..color = color);
+    // 1. Draw Shadow
+    final Paint shadowPaint = Paint()..color = Colors.black.withOpacity(0.4);
+    canvas.drawCircle(Offset(center.dx + 2, center.dy + 2), radius, shadowPaint);
 
-    final img = await pictureRecorder.endRecording().toImage(radius.toInt() * 2, radius.toInt() * 2);
+    // 2. Draw White Border Background
+    final Paint borderPaint = Paint()..color = Colors.white;
+    canvas.drawCircle(center, radius, borderPaint);
+
+    // 3. Draw Main Color Fill
+    final Paint mainPaint = Paint()..color = color;
+    canvas.drawCircle(center, radius - 4, mainPaint); // Create a 4px white border
+
+    // 4. Draw Icon if it's a regular route point
+    if (!isStart && !isEnd) {
+      const IconData icon = Icons.directions_walk;
+      TextPainter textPainter = TextPainter(textDirection: TextDirection.ltr);
+      textPainter.text = TextSpan(
+        text: String.fromCharCode(icon.codePoint),
+        style: TextStyle(
+          fontSize: 24.0,
+          fontFamily: icon.fontFamily,
+          color: Colors.white,
+        ),
+      );
+      textPainter.layout();
+      textPainter.paint(
+        canvas,
+        Offset(center.dx - textPainter.width / 2, center.dy - textPainter.height / 2),
+      );
+    }
+
+    final img = await pictureRecorder.endRecording().toImage(imageSize.toInt(), imageSize.toInt());
     final data = await img.toByteData(format: ui.ImageByteFormat.png);
     return BitmapDescriptor.fromBytes(data!.buffer.asUint8List());
   }
+  
+  Future<void> _showCustomBottomSheet({required BuildContext context, required WidgetBuilder builder}) async {
+    if (!mounted) return;
+    setState(() {
+      _isShowingBottomSheet = true;
+    });
 
-  void _showRouteDetails(int index) {
-    if (index == -1) return;
-
-    final points = _routeAlternatives[index]['points_analyzed'] as List;
-
-    showModalBottomSheet(
+    await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      builder: builder,
+    ).whenComplete(() {
+      if (mounted) {
+        setState(() {
+          _isShowingBottomSheet = false;
+        });
+      }
+    });
+  }
+
+  Future<void> _fetchAndShowNearbyReports(LatLng location) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      final reports = await ApiService.instance.getNearbyReports(location.latitude, location.longitude);
+      Navigator.of(context).pop(); 
+      if (!mounted) return;
+      
+      _showCustomBottomSheet(
+        context: context,
+        builder: (_) => NearbyReportsSheet(reports: reports),
+      );
+
+    } catch (e) {
+      Navigator.of(context).pop(); 
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Failed to get reports: $e"), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  void _showFullImageDialog(String imageUrl) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(10),
+        child: GestureDetector(
+          onTap: () => Navigator.of(context).pop(),
+          child: InteractiveViewer(
+            panEnabled: true,
+            minScale: 0.5,
+            maxScale: 4,
+            child: Image.network(
+              imageUrl,
+              fit: BoxFit.contain,
+              loadingBuilder: (context, child, progress) {
+                return progress == null ? child : const Center(child: CircularProgressIndicator());
+              },
+              errorBuilder: (c, e, s) => const Center(child: Icon(Icons.error, color: Colors.white, size: 50)),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showScoringExplanationBottomSheet() {
+    _showCustomBottomSheet(
+      context: context,
+      builder: (context) {
+        final textTheme = Theme.of(context).textTheme;
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('How is the Walkability Score Calculated?', style: textTheme.titleLarge),
+              const SizedBox(height: 24),
+              const _ScoreExplanationTile(
+                icon: Icons.add_circle,
+                color: Colors.blue,
+                title: 'Base Score: 50 points',
+                subtitle: 'Every location starts with a neutral base score.',
+              ),
+              const _ScoreExplanationTile(
+                icon: Icons.add_circle,
+                color: Colors.green,
+                title: 'Sidewalk Detected: +20 points',
+                subtitle: 'Bonus points are awarded if a sidewalk is present.',
+              ),
+               const _ScoreExplanationTile(
+                icon: Icons.add_circle,
+                color: Colors.green,
+                title: 'Sidewalk Size: Up to +25 points',
+                subtitle: 'Larger sidewalks get a higher bonus, encouraging wider pedestrian paths.',
+              ),
+              const _ScoreExplanationTile(
+                icon: Icons.remove_circle,
+                color: Colors.red,
+                title: 'No Sidewalk Penalty: -30 points',
+                subtitle: 'A significant penalty is applied if no sidewalk is found on a non-residential road.',
+              ),
+              const _ScoreExplanationTile(
+                icon: Icons.park,
+                color: Colors.teal,
+                title: 'Shady Route Bonus: Up to +20 points',
+                subtitle: 'When using the "Shady Route" mode, points are added for the number of trees detected, promoting cooler walks.',
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+      },
+    );
+  }
+  
+  void _showRouteDetails(int index) {
+    if (index == -1) return;
+    final points = _routeAlternatives[index].pointsAnalyzed;
+    final textTheme = Theme.of(context).textTheme;
+
+    _showCustomBottomSheet(
+      context: context,
       builder: (context) {
         return DraggableScrollableSheet(
-          initialChildSize: 0.5,
+          initialChildSize: 0.6,
           maxChildSize: 0.9,
-          minChildSize: 0.3,
+          minChildSize: 0.4,
           builder: (_, controller) {
             return Container(
               decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(20),
-                  topRight: Radius.circular(20),
-                ),
+                color: Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
               ),
               child: Column(
                 children: [
@@ -383,63 +514,95 @@ class _MapScreenState extends State<MapScreen> {
                     width: 40,
                     height: 5,
                     margin: const EdgeInsets.symmetric(vertical: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[300],
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                    decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10)),
                   ),
-                  const Text(
-                    "Detail Titik",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Text("Route Details", style: textTheme.titleLarge),
                   ),
-                  const SizedBox(height: 10),
                   Expanded(
                     child: ListView.builder(
                       controller: controller,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                       itemCount: points.length,
                       itemBuilder: (context, index) {
                         final point = points[index];
-                        final List<dynamic> labels = point['detected_labels'] ?? [];
+                        final List<dynamic> labels = point.detectedLabels;
 
                         return Card(
-                          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          margin: const EdgeInsets.symmetric(vertical: 8),
+                          elevation: 1,
+                          shadowColor: Colors.black.withOpacity(0.05),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           child: Padding(
-                            padding: const EdgeInsets.all(8.0),
+                            padding: const EdgeInsets.all(12.0),
                             child: Row(
                               children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(8.0),
-                                  child: Image.network(
-                                    point['photo_url'],
-                                    width: 80,
-                                    height: 80,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (c, e, s) => const Icon(Icons.error, size: 40),
+                                GestureDetector(
+                                  onTap: () => _showFullImageDialog(point.photoUrl!),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(8.0),
+                                    child: Image.network(
+                                      point.photoUrl!,
+                                      width: 80, height: 80, fit: BoxFit.cover,
+                                      errorBuilder: (c, e, s) => Container(
+                                        width: 80, height: 80, color: Colors.grey[200],
+                                        child: const Icon(Icons.broken_image, color: Colors.grey)
+                                      ),
+                                    ),
                                   ),
                                 ),
-                                const SizedBox(width: 12),
+                                const SizedBox(width: 16),
                                 Expanded(
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text('Skor: ${point['walkability_score']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                                      const SizedBox(height: 4),
+                                      Row(
+                                        children: [
+                                          Text(
+                                            'Score: ${point.walkabilityScore.round()}',
+                                            style: textTheme.titleMedium
+                                          ),
+                                          const SizedBox(width: 8),
+                                          InkWell(
+                                            onTap: _showScoringExplanationBottomSheet,
+                                            child: const Icon(Icons.info_outline, size: 20, color: Colors.grey),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
                                       if (labels.isNotEmpty)
                                         Wrap(
                                           spacing: 6.0,
                                           runSpacing: 4.0,
                                           children: labels.map((label) => Chip(
-                                            label: Text(label.toString(), style: const TextStyle(fontSize: 10)),
-                                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+                                            label: Text(label.toString(), style: const TextStyle(fontSize: 11)),
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 0),
                                             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                                             backgroundColor: Colors.grey[200],
+                                            side: BorderSide.none,
                                           )).toList(),
                                         )
                                       else
-                                        Text(
-                                          'Lat: ${(point['latitude'] as num).toStringAsFixed(5)}, Lng: ${(point['longitude'] as num).toStringAsFixed(5)}',
-                                          style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                        Text('No objects detected.', style: textTheme.bodySmall),
+                                      const SizedBox(height: 12),
+                                      SizedBox(
+                                        height: 32,
+                                        child: TextButton.icon(
+                                           style: TextButton.styleFrom(
+                                            foregroundColor: Theme.of(context).colorScheme.primary,
+                                            backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.1),
+                                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                          ),
+                                          icon: const Icon(Icons.report_problem_outlined, size: 16),
+                                          label: const Text('See Nearby Reports', style: TextStyle(fontSize: 12)),
+                                          onPressed: () {
+                                            Navigator.of(context).pop();
+                                            _fetchAndShowNearbyReports(point.toLatLng());
+                                          },
                                         ),
+                                      )
                                     ],
                                   ),
                                 ),
@@ -474,6 +637,7 @@ class _MapScreenState extends State<MapScreen> {
               FocusScope.of(context).unfocus();
               setState(() {
                 _isSearchCardExpanded = false;
+                _selectedPoint = null;
               });
             },
             initialCameraPosition: CameraPosition(
@@ -485,34 +649,54 @@ class _MapScreenState extends State<MapScreen> {
             markers: _markers,
             polylines: _polylines,
             zoomControlsEnabled: false,
+            padding: EdgeInsets.only(bottom: _routeAlternatives.isNotEmpty ? 120 : 0),
           ),
           SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 16.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildSearchCard(),
-                  if (_isLoading)
-                     // UPDATED: Show a more informative loading indicator
-                    Card(
-                      elevation: 4,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const CircularProgressIndicator(),
-                            const SizedBox(width: 16),
-                            Text(_loadingMessage),
-                          ],
-                        ),
-                      ),
+            child: Stack(
+              children: [
+                Positioned(
+                  top: 16,
+                  left: 16,
+                  right: 16,
+                  child: _buildSearchCard(),
+                ),
+                Positioned(
+                  bottom: 16,
+                  left: 16,
+                  right: 16,
+                  child: Visibility(
+                    visible: !_isShowingBottomSheet,
+                    child: RepaintBoundary(
+                      child: _isLoading
+                          ? Center(
+                              child: Card(
+                                elevation: 4,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16.0),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const CircularProgressIndicator(),
+                                      const SizedBox(width: 16),
+                                      Text(_loadingMessage),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            )
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (_selectedPoint != null)
+                                  _buildPointInfoCard(_selectedPoint!),
+                                if (_routeAlternatives.isNotEmpty)
+                                  _buildRouteInfoCards(),
+                              ],
+                            ),
                     ),
-                  if (_routeAlternatives.isNotEmpty)
-                    _buildRouteInfoCards(),
-                ],
-              ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -542,11 +726,7 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _buildCollapsedContent() {
     return InkWell(
-      onTap: () {
-        setState(() {
-          _isSearchCardExpanded = true;
-        });
-      },
+      onTap: () => setState(() => _isSearchCardExpanded = true),
       child: const Padding(
         padding: EdgeInsets.symmetric(vertical: 6.0),
         child: Row(
@@ -572,36 +752,22 @@ class _MapScreenState extends State<MapScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
             ChoiceChip(
-              label: const Text('Rute Optimal'),
+              label: const Text('Optimal Route'),
               selected: _selectedMode == 'distance_walkability',
               onSelected: (selected) {
-                if (selected) {
-                  setState(() {
-                    _selectedMode = 'distance_walkability';
-                  });
-                }
+                if(selected) setState(() => _selectedMode = 'distance_walkability');
               },
-              backgroundColor: Colors.grey.shade200,
-              selectedColor: Colors.green,
-              labelStyle: TextStyle(
-                color: _selectedMode == 'distance_walkability' ? Colors.white : Colors.black,
-              ),
+              backgroundColor: Colors.grey.shade200, selectedColor: Colors.green,
+              labelStyle: TextStyle(color: _selectedMode == 'distance_walkability' ? Colors.white : Colors.black),
             ),
             ChoiceChip(
-              label: const Text('Rute Rindang'),
+              label: const Text('Shady Route'),
               selected: _selectedMode == 'shady_route',
               onSelected: (selected) {
-                if (selected) {
-                  setState(() {
-                    _selectedMode = 'shady_route';
-                  });
-                }
+                 if(selected) setState(() => _selectedMode = 'shady_route');
               },
-              backgroundColor: Colors.grey.shade200,
-              selectedColor: Colors.green,
-              labelStyle: TextStyle(
-                color: _selectedMode == 'shady_route' ? Colors.white : Colors.black,
-              ),
+              backgroundColor: Colors.grey.shade200, selectedColor: Colors.green,
+              labelStyle: TextStyle(color: _selectedMode == 'shady_route' ? Colors.white : Colors.black),
             ),
           ],
         ),
@@ -611,14 +777,11 @@ class _MapScreenState extends State<MapScreen> {
           child: ElevatedButton(
             onPressed: _getRoute,
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.green,
-              foregroundColor: Colors.white,
+              backgroundColor: Colors.green, foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(vertical: 10),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10.0),
-              ),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10.0)),
             ),
-            child: const Text('Cari Rute', style: TextStyle(fontSize: 15)),
+            child: const Text('Find Route', style: TextStyle(fontSize: 15)),
           ),
         )
       ],
@@ -626,21 +789,14 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildAddressTypeAheadField(TextEditingController controller, String hint, IconData icon, Color iconColor) {
-    return TypeAheadField<Map<String, dynamic>>(
+    return TypeAheadField<app_models.PlaceAutocomplete>(
       controller: controller,
       suggestionsCallback: _fetchAddressSuggestions,
-      itemBuilder: (context, suggestion) {
-        final description = suggestion['description'] as String?;
-        return ListTile(
-          title: Text(description ?? 'Invalid Address', style: const TextStyle(fontSize: 14)),
-        );
-      },
-      onSelected: (suggestion) {
-        final description = suggestion['description'] as String?;
-        if (description != null) {
-          controller.text = description;
-        }
-      },
+      itemBuilder: (context, suggestion) => ListTile(
+        title: Text(suggestion.mainText, style: const TextStyle(fontSize: 14)),
+        subtitle: Text(suggestion.secondaryText, style: const TextStyle(fontSize: 12)),
+      ),
+      onSelected: (suggestion) => controller.text = suggestion.description,
       builder: (context, controller, focusNode) => TextField(
         controller: controller,
         focusNode: focusNode,
@@ -654,68 +810,77 @@ class _MapScreenState extends State<MapScreen> {
       ),
       emptyBuilder: (context) => const Padding(
         padding: EdgeInsets.all(12.0),
-        child: Text('Tidak ada alamat yang cocok.', style: TextStyle(fontSize: 14)),
+        child: Text('No matching addresses found.', style: TextStyle(fontSize: 14)),
       ),
     );
   }
 
   Widget _buildRouteInfoCards() {
-    final List<Color> colors = [Colors.green, Colors.amber, Colors.red];
+    final List<Color> colors = [Colors.green, Colors.amber.shade600, Colors.red.shade600];
+    final textTheme = Theme.of(context).textTheme;
+
     return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
       children: List.generate(_routeAlternatives.length, (index) {
         final route = _routeAlternatives[index];
+        final isSelected = _selectedRouteIndex == index;
+        final rankText = index == 0 ? "Best Route" : "Alternative";
+
         return Expanded(
           child: GestureDetector(
-            onTap: () {
-              _selectRoute(index);
-            },
+            onTap: () => _selectRoute(index),
             child: Card(
               margin: const EdgeInsets.symmetric(horizontal: 4.0),
-              color: const Color(0xFFFFFFFF),
-              elevation: 6.0,
+              color: isSelected ? const Color(0xFFF1F8E9) : Colors.white,
+              elevation: isSelected ? 6 : 2,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12.0),
                 side: BorderSide(
-                  color: _selectedRouteIndex == index ? colors[index] : Colors.grey.shade300,
-                  width: _selectedRouteIndex == index ? 2.5 : 1,
+                  color: isSelected ? colors[index] : Colors.grey.shade200,
+                  width: isSelected ? 2.0 : 1.0,
                 ),
               ),
               child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      "Rute ${index + 1}",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13,
+                      rankText,
+                      style: textTheme.bodySmall?.copyWith(
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        color: isSelected ? Colors.black87 : Colors.grey.shade700,
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
                       children: [
-                        Icon(Icons.directions_walk, color: colors[index], size: 18),
-                        const SizedBox(width: 4),
                         Text(
-                          "${(route['average_walkability_score'] as num).toStringAsFixed(1)}",
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
+                          route.averageWalkabilityScore.round().toString(),
+                          style: textTheme.titleLarge?.copyWith(
                             color: colors[index],
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          "/100",
+                          style: textTheme.bodySmall?.copyWith(
+                            color: Colors.grey,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 4),
-                    GestureDetector(
-                      onTap: () => _showRouteDetails(index),
-                      child: Text(
-                        "Detail",
-                        style: TextStyle(color: Theme.of(context).primaryColor, fontSize: 12, decoration: TextDecoration.underline),
+                    TextButton(
+                      onPressed: () => _showRouteDetails(index),
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
                       ),
+                      child: const Text("View Details"),
                     ),
                   ],
                 ),
@@ -726,4 +891,180 @@ class _MapScreenState extends State<MapScreen> {
       }),
     );
   }
+
+  Widget _buildPointInfoCard(app_models.AnalyzedPoint point) {
+    return Card(
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Stack(
+            alignment: Alignment.topRight,
+            children: [
+              ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                child: Image.network(
+                  point.photoUrl!, height: 120, width: double.infinity, fit: BoxFit.cover,
+                  errorBuilder: (c,e,s) => const SizedBox(height: 120, child: Center(child: Icon(Icons.broken_image))),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(4.0),
+                child: IconButton.filled(
+                  constraints: const BoxConstraints(), padding: const EdgeInsets.all(4),
+                  style: IconButton.styleFrom(backgroundColor: Colors.black45),
+                  icon: const Icon(Icons.close, size: 18, color: Colors.white), 
+                  onPressed: () => setState(() => _selectedPoint = null),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text("Score: ${point.walkabilityScore.round()}", style: const TextStyle(fontWeight: FontWeight.bold)),
+                ElevatedButton(
+                  onPressed: () => _fetchAndShowNearbyReports(point.toLatLng()),
+                  child: const Text("See Reports"),
+                ),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
 }
+
+class NearbyReportsSheet extends StatefulWidget {
+  final List<app_models.Report> reports;
+  const NearbyReportsSheet({super.key, required this.reports});
+
+  @override
+  State<NearbyReportsSheet> createState() => _NearbyReportsSheetState();
+}
+
+class _NearbyReportsSheetState extends State<NearbyReportsSheet> {
+  Set<int> _votingReportIds = {}; 
+
+  Future<void> _handleVote(app_models.Report report) async {
+    if (_votingReportIds.contains(report.reportId)) return;
+
+    setState(() {
+      _votingReportIds.add(report.reportId);
+    });
+
+    try {
+      if (report.isUpvoted) {
+        await ApiService.instance.removeVote(report.reportId);
+      } else {
+        await ApiService.instance.upvoteReport(report.reportId);
+      }
+    } catch (e) {
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Vote failed: $e")));
+    } finally {
+      if(mounted) {
+        setState(() {
+          _votingReportIds.remove(report.reportId);
+          report.isUpvoted = !report.isUpvoted;
+          report.upvoteCount += report.isUpvoted ? 1 : -1;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      maxChildSize: 0.9,
+      minChildSize: 0.4,
+      builder: (_, controller) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                width: 40,
+                height: 5,
+                margin: const EdgeInsets.symmetric(vertical: 10),
+                decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10)),
+              ),
+              const Text("Nearby Reports", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Expanded(
+                child: widget.reports.isEmpty
+                    ? const Center(child: Text("No reports found in this area."))
+                    : ListView.builder(
+                        controller: controller,
+                        itemCount: widget.reports.length,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        itemBuilder: (context, index) {
+                          final report = widget.reports[index];
+                          return ReportCard(
+                            report: report,
+                            showVoteButton: true,
+                            onUpvote: () => _handleVote(report),
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (context) => ReportDetailPage(initialReport: report),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ScoreExplanationTile extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String subtitle;
+
+  const _ScoreExplanationTile({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 24),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 2),
+                Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+

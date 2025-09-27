@@ -1,13 +1,13 @@
-
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'map_screen.dart'; 
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
+import 'config_service.dart';
+import 'auth_screen.dart';
+import 'map_screen.dart';
 import 'report_page.dart';
 import 'user_page.dart';
-import 'auth_screen.dart';
-import 'config_service.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,12 +17,10 @@ Future<void> main() async {
 
   try {
     await ConfigService.instance.initialize();
-
     await Supabase.initialize(
       url: ConfigService.instance.supabaseUrl,
       anonKey: ConfigService.instance.supabaseAnonKey,
     );
-
     runApp(const MyApp());
   } catch (e) {
     runApp(ErrorApp(errorMessage: e.toString()));
@@ -58,17 +56,11 @@ class MyApp extends StatelessWidget {
         ),
         scaffoldBackgroundColor: backgroundColor,
         textTheme: GoogleFonts.interTextTheme(textTheme).copyWith(
-
           titleLarge: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.bold, color: darkText),
-
           titleMedium: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold, color: darkText),
-
           titleSmall: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: darkText),
-
           bodyLarge: GoogleFonts.inter(fontSize: 16, color: bodyText),
-
           bodyMedium: GoogleFonts.inter(fontSize: 14, color: bodyText),
-
           bodySmall: GoogleFonts.inter(fontSize: 12, color: lightText),
         ),
         appBarTheme: AppBarTheme(
@@ -111,29 +103,6 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class ErrorApp extends StatelessWidget {
-  final String errorMessage;
-  const ErrorApp({super.key, required this.errorMessage});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      home: Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Text(
-              'Failed to start the application:\n\n$errorMessage',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.red, fontSize: 16),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -159,8 +128,9 @@ class _MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: _widgetOptions.elementAt(_selectedIndex),
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: _widgetOptions,
       ),
       bottomNavigationBar: BottomNavigationBar(
         items: const <BottomNavigationBarItem>[
@@ -183,3 +153,27 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 }
+
+class ErrorApp extends StatelessWidget {
+  final String errorMessage;
+  const ErrorApp({super.key, required this.errorMessage});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Text(
+              'Failed to start the application:\n\n$errorMessage',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.red, fontSize: 16),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+

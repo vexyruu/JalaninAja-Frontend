@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'main.dart'; 
+
 import 'config_service.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -21,25 +21,36 @@ class _AuthScreenState extends State<AuthScreen> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _confirmPasswordController = TextEditingController();
   
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _usernameController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
   void _switchAuthMode() {
+    if (_isLoading) return;
     setState(() {
       _isLogin = !_isLogin;
+      _formKey.currentState?.reset();
     });
   }
 
   Future<void> _submitAuth() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!_formKey.currentState!.validate() || _isLoading) return;
     _formKey.currentState!.save();
     setState(() { _isLoading = true; });
 
     try {
       if (_isLogin) {
-        await supabase.auth.signInWithPassword(
+        await Supabase.instance.client.auth.signInWithPassword(
           email: _emailController.text.trim(),
           password: _passwordController.text.trim(),
         );
       } else {
-        await supabase.auth.signUp(
+        await Supabase.instance.client.auth.signUp(
           email: _emailController.text.trim(),
           password: _passwordController.text.trim(),
           data: {'full_name': _usernameController.text.trim()},
@@ -48,6 +59,7 @@ class _AuthScreenState extends State<AuthScreen> {
            ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Registration successful! Please check your email for verification.')),
           );
+           _switchAuthMode();
         }
       }
     } on AuthException catch (error) {
@@ -64,7 +76,6 @@ class _AuthScreenState extends State<AuthScreen> {
   Future<void> _signInWithGoogle() async {
     setState(() { _isLoading = true; });
     try {
-
       final webClientId = ConfigService.instance.googleWebClientId;
       final iosClientId = ConfigService.instance.googleIosClientId;
 
@@ -74,7 +85,7 @@ class _AuthScreenState extends State<AuthScreen> {
       );
       final googleUser = await googleSignIn.signIn();
       if (googleUser == null) {
-        setState(() { _isLoading = false; });
+        if(mounted) setState(() { _isLoading = false; });
         return;
       }
       final googleAuth = await googleUser.authentication;
@@ -84,25 +95,25 @@ class _AuthScreenState extends State<AuthScreen> {
       if (accessToken == null) throw 'No Google Access Token found.';
       if (idToken == null) throw 'No Google ID Token found.';
 
-      await supabase.auth.signInWithIdToken(
+      await Supabase.instance.client.auth.signInWithIdToken(
         provider: OAuthProvider.google,
         idToken: idToken,
         accessToken: accessToken,
       );
-
+    } on AuthException catch (error) {
+      _showErrorDialog("Google Sign-In Failed: ${error.message}");
     } catch (error) {
-      _showErrorDialog(error.toString());
+      _showErrorDialog("An error occurred during Google sign-in: ${error.toString()}");
     }
     if(mounted) setState(() { _isLoading = false; });
   }
-
 
   void _showErrorDialog(String message) {
     if (!mounted) return;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Error'),
+        title: const Text('Authentication Error'),
         content: Text(message),
         actions: <Widget>[
           TextButton(
@@ -146,7 +157,7 @@ class _AuthScreenState extends State<AuthScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.directions_walk, color: Colors.white, size: 40),
+          Image.asset('assets/JalaninAjaWhiteNoBg.png', height: 60),
           const SizedBox(height: 20),
           Text(
             _isLogin ? 'Welcome Back!' : 'Create Account',
@@ -189,9 +200,12 @@ class _AuthScreenState extends State<AuthScreen> {
             if (_isLoading)
               const CircularProgressIndicator()
             else
-              ElevatedButton(
-                onPressed: _submitAuth,
-                child: Text(_isLogin ? 'Login' : 'Register'),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _submitAuth,
+                  child: Text(_isLogin ? 'Login' : 'Register'),
+                ),
               ),
             if (_isLogin) _buildSocialLogin(),
           ],
@@ -240,7 +254,7 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  Widget _buildTextField(TextEditingController controller, String label, IconData icon, {bool isPassword = false, bool isOptional = false, bool isConfirm = false}) {
+  Widget _buildTextField(TextEditingController controller, String label, IconData icon, {bool isPassword = false, bool isConfirm = false}) {
     return TextFormField(
       controller: controller,
       obscureText: isPassword,
@@ -263,9 +277,8 @@ class _AuthScreenState extends State<AuthScreen> {
         fillColor: Colors.grey[50],
       ),
       validator: (value) {
-        if (isOptional) return null;
         if (value == null || value.isEmpty) return '$label cannot be empty';
-        if (label == 'Email' && !value.contains('@')) return 'Please enter a valid email';
+        if (label == 'Email' && !RegExp(r"^[a-zA-Z0-9.a-zA-Z0-9.!#$%&'*+-/=?^_`{|}~]+@[a-zA-Z0-9]+\.[a-zA-Z]+").hasMatch(value)) return 'Please enter a valid email';
         if (label == 'Password' && value.length < 6) return 'Password must be at least 6 characters';
         if (isConfirm && value != _passwordController.text) {
           return 'Passwords do not match';
@@ -279,11 +292,14 @@ class _AuthScreenState extends State<AuthScreen> {
     return Column(
       children: [
         const SizedBox(height: 32),
-        const Row(
+        Row(
           children: [
-            Expanded(child: Divider()),
-            Padding(padding: EdgeInsets.symmetric(horizontal: 12.0), child: Text('Or continue with', style: TextStyle(color: Colors.grey))),
-            Expanded(child: Divider()),
+            const Expanded(child: Divider()),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12.0), 
+              child: Text('Or continue with', style: TextStyle(color: Colors.grey[600]))
+            ),
+            const Expanded(child: Divider()),
           ],
         ),
         const SizedBox(height: 24),
@@ -291,8 +307,6 @@ class _AuthScreenState extends State<AuthScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             _buildSocialButton('assets/google.png', _signInWithGoogle),
-            const SizedBox(width: 20),
-            _buildSocialButton('assets/apple.png', () { _showErrorDialog("Login with Apple has not been implemented."); }),
           ],
         ),
       ],
@@ -307,11 +321,8 @@ class _AuthScreenState extends State<AuthScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
         side: BorderSide(color: Colors.grey.shade300),
       ),
-      child: Row(
-        children: [
-          Image.asset(assetPath, height: 24, width: 24, errorBuilder: (c,e,s) => Icon(assetPath.contains('google') ? Icons.android : Icons.apple, color: Colors.grey)),
-        ],
-      ),
+      child: Image.asset(assetPath, height: 24, width: 24, errorBuilder: (c,e,s) => const Icon(Icons.android, color: Colors.green)),
     );
   }
 }
+

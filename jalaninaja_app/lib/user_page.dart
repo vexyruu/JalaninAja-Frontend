@@ -1,16 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'api_service.dart';
 import 'auth_screen.dart';
-import 'config_service.dart';
+import 'models.dart' as app_models;
 import 'settings_page.dart';
+import 'report_detail_page.dart';
+import 'widgets/report_card.dart';
 
-class UserProfileData {
-  final Map<String, dynamic> profile;
-  final List<dynamic> topReports;
+class UserProfilePageData {
+  final app_models.UserProfile profile;
+  final List<app_models.Report> topReports;
 
-  UserProfileData({required this.profile, required this.topReports});
+  UserProfilePageData({required this.profile, required this.topReports});
 }
 
 class UserPage extends StatefulWidget {
@@ -21,8 +23,7 @@ class UserPage extends StatefulWidget {
 }
 
 class _UserPageState extends State<UserPage> {
-  final String _apiBaseUrl = ConfigService.instance.apiBaseUrl;
-  late Future<UserProfileData> _profileDataFuture;
+  late Future<UserProfilePageData> _profileDataFuture;
 
   @override
   void initState() {
@@ -30,64 +31,36 @@ class _UserPageState extends State<UserPage> {
     _profileDataFuture = _fetchCombinedData();
   }
 
-  String? _getAuthToken() {
-    return Supabase.instance.client.auth.currentSession?.accessToken;
-  }
-
-  Future<UserProfileData> _fetchCombinedData() async {
-    final token = _getAuthToken();
-    if (token == null) {
-      throw Exception('You must be logged in to view your profile.');
-    }
-    
+  Future<UserProfilePageData> _fetchCombinedData() async {
     try {
-
       final results = await Future.wait([
-        _fetchUserProfile(token),
-        _fetchUserTopReports(token),
+        ApiService.instance.getUserProfile(),
+        ApiService.instance.getMyTopReports(),
       ]);
       
-      final profile = results[0] as Map<String, dynamic>;
-      final topReports = results[1] as List<dynamic>;
+      final profile = results[0] as app_models.UserProfile;
+      final topReports = results[1] as List<app_models.Report>;
 
-      return UserProfileData(
+      return UserProfilePageData(
         profile: profile,
         topReports: topReports,
       );
     } catch (e) {
       debugPrint('Error fetching combined profile data: $e');
-      throw Exception('Failed to load profile data.');
-    }
-  }
-
-  Future<Map<String, dynamic>> _fetchUserProfile(String token) async {
-    final response = await http.get(
-      Uri.parse("$_apiBaseUrl/users/me"),
-      headers: {'Authorization': 'Bearer $token'},
-    );
-    if (response.statusCode == 200) {
-      return json.decode(response.body);
-    } else {
-      throw Exception('Failed to load user profile. Status: ${response.statusCode}');
-    }
-  }
-
-  Future<List<dynamic>> _fetchUserTopReports(String token) async {
-    final response = await http.get(
-      Uri.parse("$_apiBaseUrl/reports/me/top"),
-      headers: {'Authorization': 'Bearer $token'},
-    );
-    if (response.statusCode == 200) {
-      return json.decode(response.body);
-    } else {
-      throw Exception('Failed to load top reports. Status: ${response.statusCode}');
+      rethrow;
     }
   }
   
   void _navigateToSettings() async {
-    await Navigator.of(context).push(
+    final result = await Navigator.of(context).push(
       MaterialPageRoute(builder: (context) => const SettingsPage()),
     );
+    if (result == true) {
+      _refreshData();
+    }
+  }
+
+  void _refreshData() {
     setState(() {
       _profileDataFuture = _fetchCombinedData();
     });
@@ -105,6 +78,7 @@ class _UserPageState extends State<UserPage> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
               await Supabase.instance.client.auth.signOut();
               if (mounted) {
@@ -143,46 +117,44 @@ class _UserPageState extends State<UserPage> {
           ),
         ],
       ),
-      body: FutureBuilder<UserProfileData>(
+      body: FutureBuilder<UserProfilePageData>(
         future: _profileDataFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
-            return Center(child: Text('${snapshot.error}'));
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text('Failed to load profile data.\nPlease try again.\n\nError: ${snapshot.error}', textAlign: TextAlign.center),
+              )
+            );
           } else if (!snapshot.hasData) {
             return const Center(child: Text('No profile data found.'));
           }
 
-          final profileData = snapshot.data!;
-          final profile = profileData.profile;
-          final topReports = profileData.topReports;
-          final avatarUrl = profile['user_avatar_url'];
-          final userLevel = profile['user_level'];
+          final profile = snapshot.data!.profile;
+          final topReports = snapshot.data!.topReports;
 
           return RefreshIndicator(
-            onRefresh: () async {
-              setState(() {
-                _profileDataFuture = _fetchCombinedData();
-              });
-            },
+            onRefresh: () async => _refreshData(),
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
               children: <Widget>[
                 const SizedBox(height: 20),
-                _buildProfileHeader(profile['user_name'], profile['user_email'], avatarUrl, textTheme),
+                _buildProfileHeader(profile, textTheme),
                 const SizedBox(height: 24),
-                _buildStatsRow(profile['reports_made'], profile['user_points'], textTheme),
+                _buildStatsRow(profile, textTheme),
                 const SizedBox(height: 32),
-                if (userLevel != 'Pejalan Kaki') ...[
-                  Text('Badge', style: textTheme.titleMedium),
+                if (profile.badges.isNotEmpty) ...[
+                  Text('Badges', style: textTheme.titleMedium),
                   const SizedBox(height: 8),
-                  _buildBadgeCard(userLevel, textTheme),
+                  _buildBadgeCard(profile.userLevel, textTheme),
                   const SizedBox(height: 32),
                 ],
                 Text('Top Reports', style: textTheme.titleMedium),
                 const SizedBox(height: 8),
-                _buildTopReportsList(topReports, profile['user_name'], avatarUrl, textTheme),
+                _buildTopReportsList(topReports, profile, textTheme),
                 const SizedBox(height: 48),
               ],
             ),
@@ -192,36 +164,36 @@ class _UserPageState extends State<UserPage> {
     );
   }
 
-  Widget _buildProfileHeader(String name, String email, String? avatarUrl, TextTheme textTheme) {
+  Widget _buildProfileHeader(app_models.UserProfile profile, TextTheme textTheme) {
     return Row(
       children: [
         CircleAvatar(
           radius: 30,
           backgroundColor: Colors.grey.shade300,
-          backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-          child: avatarUrl == null
-              ? const Icon(Icons.person, size: 30, color: Colors.white)
+          backgroundImage: profile.userAvatarUrl != null ? NetworkImage(profile.userAvatarUrl!) : null,
+          child: profile.userAvatarUrl == null
+              ? Text(profile.userName.isNotEmpty ? profile.userName[0].toUpperCase() : '?', style: textTheme.headlineSmall?.copyWith(color: Colors.white))
               : null,
         ),
         const SizedBox(width: 16),
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(name, style: textTheme.titleLarge),
+            Text(profile.userName, style: textTheme.titleLarge),
             const SizedBox(height: 4),
-            Text(email, style: textTheme.bodyMedium?.copyWith(color: Colors.grey[600])),
+            Text(profile.userEmail, style: textTheme.bodyMedium?.copyWith(color: Colors.grey[600])),
           ],
         ),
       ],
     );
   }
 
-  Widget _buildStatsRow(int contributions, int points, TextTheme textTheme) {
+  Widget _buildStatsRow(app_models.UserProfile profile, TextTheme textTheme) {
     return Row(
       children: [
-        Expanded(child: _buildStatCard('$contributions', 'Contribution', textTheme)),
+        Expanded(child: _buildStatCard('${profile.reportsMade}', 'Reports', textTheme)),
         const SizedBox(width: 16),
-        Expanded(child: _buildStatCard(points.toString(), 'Point', textTheme)),
+        Expanded(child: _buildStatCard(profile.userPoints.toString(), 'Points', textTheme)),
       ],
     );
   }
@@ -230,12 +202,13 @@ class _UserPageState extends State<UserPage> {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 16),
       decoration: BoxDecoration(
-        color: Colors.green.withOpacity(0.1),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200, width: 1.5),
       ),
       child: Column(
         children: [
-          Text(value, style: textTheme.titleLarge?.copyWith(color: const Color(0xFF2E7D32))),
+          Text(value, style: textTheme.titleLarge?.copyWith(color: const Color(0xFF2E7D32), fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
           Text(label, style: textTheme.bodyMedium?.copyWith(color: const Color(0xFF2E7D32))),
         ],
@@ -246,8 +219,11 @@ class _UserPageState extends State<UserPage> {
   Widget _buildBadgeCard(String badgeName, TextTheme textTheme) {
     return Card(
       elevation: 0,
-      color: Colors.green.withOpacity(0.1),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.grey.shade200, width: 1.5),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Row(
@@ -261,12 +237,14 @@ class _UserPageState extends State<UserPage> {
               child: const Icon(Icons.star, color: Colors.white, size: 24),
             ),
             const SizedBox(width: 16),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(badgeName, style: textTheme.titleSmall),
-                Text('You have achieved ${badgeName.toLowerCase()}', style: textTheme.bodySmall),
-              ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(badgeName, style: textTheme.titleSmall),
+                  Text('You have achieved this milestone!', style: textTheme.bodySmall, maxLines: 2),
+                ],
+              ),
             ),
           ],
         ),
@@ -274,11 +252,16 @@ class _UserPageState extends State<UserPage> {
     );
   }
 
-  Widget _buildTopReportsList(List<dynamic> reports, String userName, String? avatarUrl, TextTheme textTheme) {
+  Widget _buildTopReportsList(List<app_models.Report> reports, app_models.UserProfile currentUser, TextTheme textTheme) {
     if (reports.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 24.0),
-        child: Center(child: Text('You have no top reports yet.', style: textTheme.bodyMedium)),
+        child: Center(
+            child: Text(
+          'Your most upvoted reports will appear here.',
+          style: textTheme.bodyMedium?.copyWith(color: Colors.grey),
+          textAlign: TextAlign.center,
+        )),
       );
     }
     return ListView.builder(
@@ -287,89 +270,37 @@ class _UserPageState extends State<UserPage> {
       itemCount: reports.length,
       itemBuilder: (context, index) {
         final report = reports[index];
-        return _buildReportCard(report, userName, avatarUrl, textTheme);
+        return _buildReportCard(report, currentUser, textTheme);
       },
     );
   }
 
-  Widget _buildReportCard(Map<String, dynamic> report, String userName, String? avatarUrl, TextTheme textTheme) {
-    return Card(
-      elevation: 0,
-      color: Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: Colors.grey.shade300)
-      ),
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  radius: 20,
-                  backgroundColor: Colors.grey.shade300,
-                  backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-                  child: avatarUrl == null
-                      ? const Icon(Icons.person, color: Colors.white)
-                      : null,
-                ),
-                const SizedBox(width: 12),
-                Text(userName, style: textTheme.titleSmall),
-                const Spacer(),
-                const Icon(Icons.star, color: Color(0xFFFFC107), size: 18),
-              ],
-            ),
+  Widget _buildReportCard(app_models.Report report, app_models.UserProfile author, TextTheme textTheme) {
+    final reportWithAuthor = app_models.Report(
+      reportId: report.reportId,
+      description: report.description,
+      photoUrl: report.photoUrl,
+      latitude: report.latitude,
+      longitude: report.longitude,
+      category: report.category,
+      address: report.address,
+      upvoteCount: report.upvoteCount,
+      createdAt: report.createdAt,
+      author: app_models.User(name: author.userName, points: author.userPoints, avatarUrl: author.userAvatarUrl),
+    );
+
+    return ReportCard(
+      report: reportWithAuthor,
+      isTopReport: true,
+      showVoteButton: false, 
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (context) => ReportDetailPage(initialReport: reportWithAuthor),
           ),
-          if (report['photo_url'] != null)
-            Image.network(
-              report['photo_url'],
-              height: 150,
-              width: double.infinity,
-              fit: BoxFit.cover,
-              errorBuilder: (c, e, s) => const SizedBox(height: 150, child: Icon(Icons.broken_image, color: Colors.grey)),
-            ),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(report['description'] ?? 'No description', style: textTheme.bodyMedium, maxLines: 2, overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        report['address'] ?? 'Address not available',
-                        style: textTheme.bodySmall,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[200],
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.thumb_up, size: 14, color: Colors.grey),
-                          const SizedBox(width: 4),
-                          Text((report['upvote_count'] ?? 0).toString()),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
+      onUpvote: () {},
     );
   }
 }
-

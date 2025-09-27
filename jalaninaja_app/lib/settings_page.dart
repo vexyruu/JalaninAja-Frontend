@@ -1,10 +1,10 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'config_service.dart';
+
+import 'api_service.dart';
+import 'models.dart' as app_models;
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -23,7 +23,7 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _avatarUrl;
   XFile? _newAvatarFile; 
 
-  late Future<Map<String, dynamic>> _profileFuture;
+  late Future<app_models.UserProfile> _profileFuture;
 
   @override
   void initState() {
@@ -31,21 +31,14 @@ class _SettingsPageState extends State<SettingsPage> {
     _profileFuture = _getInitialProfile();
   }
 
-  Future<Map<String, dynamic>> _getInitialProfile() async {
+  Future<app_models.UserProfile> _getInitialProfile() async {
     try {
-      final userId = Supabase.instance.client.auth.currentUser?.id;
-      if (userId == null) throw Exception("User not logged in.");
-
-      final response = await http.get(Uri.parse('${ConfigService.instance.apiBaseUrl}/users/$userId'));
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        _usernameController.text = data['user_name'] ?? '';
-        _emailController.text = data['user_email'] ?? '';
-        _avatarUrl = data['user_avatar_url'];
-        return data;
-      } else {
-        throw Exception("Failed to load profile.");
-      }
+      final profile = await ApiService.instance.getUserProfile();
+      // Populate controllers and state with the fetched data
+      _usernameController.text = profile.userName;
+      _emailController.text = profile.userEmail;
+      _avatarUrl = profile.userAvatarUrl;
+      return profile;
     } catch (e) {
       _showErrorSnackBar(e.toString());
       rethrow;
@@ -80,6 +73,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final picker = ImagePicker();
     final imageFile = await picker.pickImage(
       source: ImageSource.gallery,
+      imageQuality: 80,
       maxWidth: 300,
       maxHeight: 300,
     );
@@ -91,7 +85,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _updateProfile() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!_formKey.currentState!.validate() || _isLoading) return;
     setState(() => _isLoading = true);
 
     try {
@@ -102,44 +96,29 @@ class _SettingsPageState extends State<SettingsPage> {
 
         final bytes = await _newAvatarFile!.readAsBytes();
         final fileExt = _newAvatarFile!.path.split('.').last;
-        final fileName = 'avatar.$fileExt';
+        final fileName = '${DateTime.now().millisecondsSinceEpoch}.$fileExt';
         final filePath = '${user.id}/$fileName';
 
         await Supabase.instance.client.storage.from('avatars').uploadBinary(
               filePath,
               bytes,
-              fileOptions: const FileOptions(cacheControl: '3600', upsert: true),
+              fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
             );
         newAvatarUrl = Supabase.instance.client.storage
             .from('avatars')
             .getPublicUrl(filePath);
       }
-
-      final token = Supabase.instance.client.auth.currentSession?.accessToken;
-      if (token == null) throw Exception("Not authenticated.");
-
-      final response = await http.patch(
-        Uri.parse('${ConfigService.instance.apiBaseUrl}/users/me'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: json.encode({
-          'name': _usernameController.text.trim(),
-          'avatar_url': newAvatarUrl,
-        }),
+      
+      await ApiService.instance.updateUserProfile(
+        name: _usernameController.text.trim(),
+        avatarUrl: newAvatarUrl,
       );
-
-      if (response.statusCode == 200) {
-        _showSuccessSnackBar('Profile updated successfully!');
-        if (mounted) {
-          Navigator.of(context).pop();
-        }
-      } else {
-        final error = json.decode(response.body);
-        throw Exception(error['detail'] ?? 'Failed to update profile.');
+      
+      _showSuccessSnackBar('Profile updated successfully!');
+      if (mounted) {
+        // Pop with a 'true' result to indicate success
+        Navigator.of(context).pop(true);
       }
-
     } on StorageException catch (e) {
       _showErrorSnackBar("Storage Error: ${e.message}");
     } catch (e) {
@@ -188,6 +167,7 @@ class _SettingsPageState extends State<SettingsPage> {
             controller: _newPasswordController,
             obscureText: true,
             decoration: const InputDecoration(labelText: 'New Password'),
+            autofocus: true,
           ),
           actions: [
             TextButton(
@@ -212,14 +192,10 @@ class _SettingsPageState extends State<SettingsPage> {
         title: const Text('Personal Data'),
         backgroundColor: Colors.white,
         elevation: 1,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
       ),
       body: Stack(
         children: [
-          FutureBuilder<Map<String, dynamic>>(
+          FutureBuilder<app_models.UserProfile>(
             future: _profileFuture,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
@@ -301,7 +277,6 @@ class _SettingsPageState extends State<SettingsPage> {
                   CircleAvatar(
                     radius: 50,
                     backgroundColor: Colors.grey.shade300,
-                    // Display the new image file if it exists, otherwise show the existing URL.
                     backgroundImage: _newAvatarFile != null
                         ? FileImage(File(_newAvatarFile!.path))
                         : (_avatarUrl != null ? NetworkImage(_avatarUrl!) : null) as ImageProvider?,
@@ -376,3 +351,4 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
+
